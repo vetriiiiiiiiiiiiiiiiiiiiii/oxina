@@ -1,0 +1,23 @@
+# /etc/systemd/system/oxina-worker.service
+[Unit]
+Description=Oxina Groups background worker (notifications, follow-ups, housekeeping)
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=oxina
+Group=oxina
+WorkingDirectory=/opt/oxina/current
+EnvironmentFile=/opt/oxina/shared/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run worker
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

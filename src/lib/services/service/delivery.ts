@@ -1,0 +1,292 @@
+import { z } from "zod";
+import type { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/db";
+import { forbidden, invalid, notFound, rule } from "@/lib/errors";
+import { assertBranch, branchFilter, requirePermission, type Actor } from "@/lib/rbac/actor";
+import { audit } from "@/lib/audit";
+import { D } from "@/lib/money";
+import { notifyUsers, queueCustomerMessage } from "@/lib/notifications";
+import { buildStageView } from "@/lib/service/stages";
+import { applyStockChange } from "../stock";
+import { getBranchSetting } from "../settings";
+import { activity, afterCommit, getJobForActor, lockJob, setJobStatus, templateValues, timeline } from "./common";
+import { qualityGatePassed } from "./quality";
+
+/** Stage 9. Requires passed QC (when work was done) and a finalized invoice. */
+export async function markReadyForDelivery(actor: Actor, jobId: string, pickupInstructions?: string) {
+  requirePermission(actor, "service.handover");
+  const job = await getJobForActor(actor, jobId);
+  await prisma.$transaction(async (tx) => {
+    const j = await lockJob(tx, jobId);
+    if (j.status !== "FINAL_BILLING") throw rule("A vehicle is marked ready after quality inspection and final billing.");
+    if (!(await qualityGatePassed(tx, jobId))) throw rule("Mandatory quality and safety checks have not passed.");
+    const inv = await tx.invoice.findFirst({ where: { serviceJobId: jobId, status: { in: ["FINALIZED", "PARTIALLY_PAID", "PAID"] } } });
+    if (!inv) throw rule("Finalize the invoice before marking the vehicle ready.");
+    const openParts = await tx.sparePartRequest.count({ where: { jobId, status: { in: ["RESERVED", "PICKING", "PICKED"] } } });
+    if (openParts) throw rule("Some reserved parts have not been issued or released.");
+    await setJobStatus(tx, j, "READY_FOR_DELIVERY", { readyAt: new Date(), etaEarliest: null, etaLatest: null, etaConfidence: null });
+    await timeline(tx, jobId, {
+      stage: "READY_FOR_DELIVERY",
+      state: "ACTIVE",
+      title: "Your vehicle is ready for collection",
+      customerNote: pickupInstructions ?? `Please collect your vehicle from ${job.branch.name}. Bring your job number ${job.jobNumber}.`,
+      actor,
+      nextExpectedAction: D(inv.balanceDue).greaterThan(0) ? "Settle the outstanding balance at pickup." : "Collect your vehicle.",
+    });
+    await queueCustomerMessage(tx, { templateKey: "READY_FOR_DELIVERY", businessUnitId: job.branch.businessUnitId, values: templateValues(j), email: job.customer.email, customerId: job.customerId, branchId: job.branchId, serviceJobId: jobId });
+    if (job.customer.userId) await notifyUsers(tx, [job.customer.userId], { type: "READY_FOR_DELIVERY", title: "Your vehicle is ready", body: `${job.customerVehicle.modelName} is ready for collection at ${job.branch.name}.`, link: `/portal/jobs/${jobId}` });
+    await activity(tx, job.branchId, jobId, actor.userId, "job.ready", {});
+  });
+  afterCommit(jobId);
+}
+
+export const handoverInput = z.object({
+  recipientName: z.string().trim().min(2).max(120),
+  recipientRelation: z.enum(["OWNER", "FAMILY", "AUTHORIZED_PERSON", "DRIVER"]),
+  odometerOut: z.coerce.number().int().min(0),
+  checklist: z.object({
+    vehicleInspectedWithCustomer: z.boolean(),
+    accessoriesReturned: z.boolean(),
+    invoiceExplained: z.boolean(),
+    oldPartsOffered: z.boolean(),
+  }),
+  customerAcknowledged: z.boolean(),
+  notes: z.string().trim().max(1000).optional(),
+});
+
+/** Stage 10 — handover and closure. */
+export async function handoverVehicle(actor: Actor, jobId: string, input: z.infer<typeof handoverInput>) {
+  requirePermission(actor, "service.handover");
+  const job = await getJobForActor(actor, jobId);
+  await prisma.$transaction(async (tx) => {
+    const j = await lockJob(tx, jobId);
+    if (j.status !== "READY_FOR_DELIVERY") throw rule("Only vehicles marked ready for delivery can be handed over.");
+    if (!(await qualityGatePassed(tx, jobId))) throw rule("Mandatory quality and safety checks have not passed.");
+    if (input.odometerOut < j.odometerIn) throw invalid(`Odometer cannot be below the intake reading (${j.odometerIn} km).`);
+    if (!input.customerAcknowledged) throw invalid("The customer (or authorised recipient) must acknowledge the handover.");
+    if (!input.checklist.vehicleInspectedWithCustomer || !input.checklist.accessoriesReturned) throw invalid("Complete the mandatory handover checklist items.");
+    const inv = await tx.invoice.findFirst({ where: { serviceJobId: jobId, status: { not: "CANCELLED" } } });
+    if (!inv || inv.status === "DRAFT") throw rule("The invoice must be finalized before handover.");
+    const pendingPayments = await tx.payment.count({ where: { invoiceId: inv.id, status: "PENDING_CONFIRMATION" } });
+    const allowBalance = await getBranchSetting(tx, job.branchId, "service.allowDeliveryWithBalance");
+    if (D(inv.balanceDue).greaterThan(0) && !allowBalance) {
+      throw rule(pendingPayments ? "A payment is awaiting confirmation. Confirm it before handover." : "The invoice has an outstanding balance. Record and confirm payment before handover.");
+    }
+
+    // Release any reservations still held for this job (e.g. optional parts never fitted).
+    const leftovers = await tx.stockReservation.findMany({ where: { status: "ACTIVE", sparePartRequest: { jobId } } });
+    for (const r of leftovers) {
+      await applyStockChange(tx, { itemId: r.itemId, locationId: r.locationId, branchId: r.branchId, type: "RELEASE", reserved: -r.quantity, performedById: actor.userId, referenceType: "SERVICE_JOB", referenceId: jobId, serviceJobId: jobId, reason: "Job closed" });
+      await tx.stockReservation.update({ where: { id: r.id }, data: { status: "RELEASED", closedAt: new Date() } });
+    }
+    await tx.sparePartRequest.updateMany({ where: { jobId, status: { notIn: ["ISSUED", "CANCELLED"] } }, data: { status: "CANCELLED" } });
+
+    const now = new Date();
+    await tx.serviceHandover.create({
+      data: { jobId, handedOverById: actor.userId, recipientName: input.recipientName, recipientRelation: input.recipientRelation, odometerOut: input.odometerOut, checklist: input.checklist, customerAcknowledged: input.customerAcknowledged, notes: input.notes },
+    });
+    await tx.customerVehicle.update({ where: { id: j.customerVehicleId }, data: { lastOdometer: input.odometerOut } });
+    await setJobStatus(tx, j, "DELIVERED", { deliveredAt: now, odometerOut: input.odometerOut });
+    await timeline(tx, jobId, { stage: "READY_FOR_DELIVERY", state: "COMPLETED", title: "Ready for delivery" });
+    await timeline(tx, jobId, { stage: "DELIVERED", state: "COMPLETED", title: `Vehicle handed over to ${input.recipientName}`, actor, nextExpectedAction: "We'll check in with you tomorrow. Please share your feedback." });
+
+    // Closure conditions: delivered, invoice finalized, no open parts — then close.
+    await setJobStatus(tx, j, "CLOSED", { closedAt: now });
+
+    // Stage 11 — follow-ups.
+    const reminderDays = Number(await getBranchSetting(tx, job.branchId, "followup.serviceReminderDays"));
+    const day = 24 * 3600_000;
+    await tx.followUp.createMany({
+      data: [
+        { type: "NEXT_DAY", dueAt: new Date(now.getTime() + day) },
+        { type: "THREE_DAY", dueAt: new Date(now.getTime() + 3 * day) },
+        { type: "FEEDBACK", dueAt: new Date(now.getTime() + 2 * day) },
+        { type: "SERVICE_REMINDER", dueAt: new Date(now.getTime() + reminderDays * day) },
+      ].map((f) => ({ ...f, branchId: job.branchId, customerId: job.customerId, serviceJobId: jobId, assignedToId: j.serviceAdvisorId })),
+    });
+    await queueCustomerMessage(tx, { templateKey: "VEHICLE_DELIVERED", businessUnitId: job.branch.businessUnitId, values: templateValues(j, { delivered_at: now.toISOString().slice(0, 10) }), email: job.customer.email, customerId: job.customerId, branchId: job.branchId, serviceJobId: jobId });
+    await activity(tx, job.branchId, jobId, actor.userId, "job.delivered", { recipient: input.recipientName });
+    await audit(tx, { actorId: actor.userId, action: "service.job.handover", entityType: "ServiceJob", entityId: jobId, branchId: job.branchId, after: { recipient: input.recipientName, odometerOut: input.odometerOut } });
+  });
+  afterCommit(jobId);
+}
+
+export const followUpInput = z.object({
+  status: z.enum(["COMPLETED", "NO_ANSWER", "RESCHEDULED", "CANCELLED"]),
+  outcome: z.string().trim().max(200).optional(),
+  notes: z.string().trim().max(1000).optional(),
+  nextDueAt: z.coerce.date().optional(),
+});
+
+export async function recordFollowUp(actor: Actor, id: string, input: z.infer<typeof followUpInput>) {
+  requirePermission(actor, "followups.manage");
+  const f = await prisma.followUp.findUnique({ where: { id } });
+  if (!f) throw notFound("Follow-up");
+  assertBranch(actor, f.branchId, "Follow-up");
+  if (f.status !== "PENDING") throw rule("This follow-up is already closed.");
+  if ((input.status === "RESCHEDULED" || input.status === "NO_ANSWER") && !input.nextDueAt) throw invalid("Choose the next follow-up date.");
+  await prisma.$transaction(async (tx) => {
+    await tx.followUp.update({
+      where: { id },
+      data: { status: input.status === "NO_ANSWER" || input.status === "RESCHEDULED" ? "PENDING" : input.status, attempts: { increment: 1 }, outcome: input.outcome ?? input.status, notes: input.notes, nextDueAt: input.nextDueAt ?? null, dueAt: input.nextDueAt ?? f.dueAt, completedAt: input.status === "COMPLETED" ? new Date() : null },
+    });
+    await audit(tx, { actorId: actor.userId, action: "followup.record", entityType: "FollowUp", entityId: id, branchId: f.branchId, after: input });
+  });
+}
+
+export async function listFollowUps(actor: Actor, q: { branchId?: string; due?: "today" | "overdue" | "upcoming" }) {
+  requirePermission(actor, "followups.manage", "service.view");
+  const now = new Date();
+  const endOfDay = new Date(now.getTime() + 24 * 3600_000);
+  return prisma.followUp.findMany({
+    where: {
+      ...branchFilter(actor, q.branchId),
+      status: "PENDING",
+      dueAt: q.due === "overdue" ? { lt: now } : q.due === "upcoming" ? { gt: endOfDay } : { lte: endOfDay },
+    },
+    orderBy: { dueAt: "asc" },
+    take: 200,
+    include: { customer: { select: { fullName: true, phone: true } }, serviceJob: { select: { id: true, jobNumber: true } }, assignedTo: { select: { name: true } } },
+  });
+}
+
+export const feedbackInput = z.object({ rating: z.coerce.number().int().min(1).max(5), comments: z.string().trim().max(2000).optional() });
+
+export async function submitFeedback(actor: Actor, jobId: string, input: z.infer<typeof feedbackInput>) {
+  if (actor.kind !== "CUSTOMER") throw forbidden();
+  const job = await getJobForActor(actor, jobId);
+  if (!["DELIVERED", "CLOSED"].includes(job.status)) throw rule("Feedback opens after your vehicle is delivered.");
+  const exists = await prisma.customerFeedback.findUnique({ where: { serviceJobId: jobId } });
+  if (exists) throw rule("Thank you — feedback for this visit was already submitted.");
+  await prisma.$transaction(async (tx) => {
+    await tx.customerFeedback.create({ data: { serviceJobId: jobId, customerId: job.customerId, rating: input.rating, comments: input.comments } });
+    await tx.followUp.updateMany({ where: { serviceJobId: jobId, type: "FEEDBACK", status: "PENDING" }, data: { status: "COMPLETED", outcome: `Rated ${input.rating}/5 in portal`, completedAt: new Date() } });
+    if (input.rating <= 2) await notifyUsers(tx, [job.serviceAdvisorId], { type: "LOW_FEEDBACK", title: `Low rating (${input.rating}/5) — ${job.jobNumber}`, body: input.comments ?? "", link: `/service/${jobId}`, branchId: job.branchId });
+  });
+}
+
+/**
+ * The customer's view of a job. An explicit allow-list: no internal notes, costs,
+ * supplier data, or other employees' private details are ever selected.
+ */
+export async function customerJobView(actor: Actor, jobId: string) {
+  const job = await getJobForActor(actor, jobId);
+  const [events, estimates, invoice, photos, feedback, tasks, shortages] = await Promise.all([
+    prisma.serviceTimelineEvent.findMany({ where: { jobId }, orderBy: { occurredAt: "asc" } }),
+    prisma.repairEstimate.findMany({
+      where: { jobId, status: { not: "DRAFT" } },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true, estimateNumber: true, kind: true, status: true, labourTotal: true, partsTotal: true, discountTotal: true, taxTotal: true, grandTotal: true, approvedTotal: true, expectedCompletionAt: true, customerNote: true, sentAt: true, decidedAt: true,
+        lines: { select: { id: true, type: true, description: true, quantity: true, unitPrice: true, discount: true, taxAmount: true, lineTotal: true, isOptional: true, approvalStatus: true, repairTaskId: true } },
+      },
+    }),
+    prisma.invoice.findFirst({ where: { serviceJobId: jobId, status: { notIn: ["DRAFT", "CANCELLED"] } }, select: { id: true, invoiceNumber: true, status: true, grandTotal: true, amountPaid: true, balanceDue: true } }),
+    prisma.servicePhoto.findMany({ where: { jobId, customerVisible: true }, select: { id: true, fileId: true, stage: true, caption: true } }),
+    prisma.customerFeedback.findUnique({ where: { serviceJobId: jobId }, select: { rating: true, comments: true } }),
+    prisma.repairTask.findMany({ where: { jobId, status: { not: "CANCELLED" }, approved: true }, select: { id: true, title: true, status: true }, orderBy: { sequence: "asc" } }),
+    prisma.sparePartRequest.count({ where: { jobId, status: { in: ["UNAVAILABLE", "AWAITING_PROCUREMENT"] } } }),
+  ]);
+  const breakdown = (job.etaBreakdown ?? {}) as { reason?: string };
+  return {
+    id: job.id,
+    jobNumber: job.jobNumber,
+    status: job.status,
+    serviceType: job.serviceType,
+    receivedAt: job.receivedAt,
+    acknowledgedAt: job.customerAcknowledgedAt,
+    vehicle: { modelName: job.customerVehicle.modelName, registrationNumber: job.customerVehicle.registrationNumber },
+    branch: { name: job.branch.name, phone: job.branch.phone, address: [job.branch.addressLine, job.branch.city].filter(Boolean).join(", "), timezone: job.branch.timezone },
+    advisor: { name: job.serviceAdvisor.name, phone: job.branch.phone },
+    reportedProblems: job.reportedProblems,
+    eta: {
+      earliest: job.etaEarliest,
+      latest: job.etaLatest,
+      confidence: job.etaConfidence,
+      updatedAt: job.etaUpdatedAt,
+      reason: breakdown.reason ?? null,
+      initialEstimate: job.expectedCompletionAt,
+    },
+    partsDelayed: shortages > 0,
+    stages: buildStageView(events, job.status),
+    events: events.map((e) => ({ id: e.id, stage: e.stage, state: e.state, title: e.title, note: e.customerNote, actorName: e.actorName, actorRole: e.actorRole, next: e.nextExpectedAction, at: e.occurredAt })),
+    estimates,
+    tasks,
+    invoice,
+    photos,
+    feedback,
+  };
+}
+
+export type CustomerJobView = Awaited<ReturnType<typeof customerJobView>>;
+
+/** Staff workspace data for a job (everything, including internal records). */
+export async function staffJobDetail(actor: Actor, jobId: string) {
+  const job = await getJobForActor(actor, jobId);
+  if (actor.kind !== "STAFF") throw forbidden();
+  const [full, events, activityLog, availability] = await Promise.all([
+    prisma.serviceJob.findUniqueOrThrow({
+      where: { id: jobId },
+      include: {
+        assignments: { where: { releasedAt: null }, include: { user: { select: { id: true, name: true, employee: { select: { employeeCode: true } } } } } },
+        inspections: { include: { examiner: { select: { name: true } } }, orderBy: { startedAt: "asc" } },
+        tasks: {
+          orderBy: { sequence: "asc" },
+          include: {
+            assignedMechanic: { select: { id: true, name: true, employee: { select: { employeeCode: true } } } },
+            dependencies: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
+            workLogs: { orderBy: { createdAt: "desc" }, take: 10, include: { mechanic: { select: { name: true } } } },
+          },
+        },
+        estimates: { orderBy: { createdAt: "asc" }, include: { lines: true, approvals: { orderBy: { decidedAt: "asc" } } } },
+        partRequests: {
+          orderBy: { createdAt: "asc" },
+          include: { item: { select: { partNumber: true, name: true } }, location: { select: { code: true } }, issue: { include: { issuedBy: { select: { name: true } }, receivedBy: { select: { name: true } } } }, repairTask: { select: { title: true } } },
+        },
+        qualityInspections: { orderBy: { startedAt: "asc" }, include: { inspector: { select: { name: true } }, testRides: { include: { rider: { select: { name: true } } } } } },
+        invoices: { include: { lines: true, payments: { orderBy: { createdAt: "asc" } }, creditNotes: true }, orderBy: { createdAt: "asc" } },
+        photos: { orderBy: { createdAt: "asc" } },
+        handover: true,
+        feedback: true,
+        followUps: { orderBy: { dueAt: "asc" } },
+      },
+    }),
+    prisma.serviceTimelineEvent.findMany({ where: { jobId }, orderBy: { occurredAt: "asc" } }),
+    prisma.internalActivityLog.findMany({ where: { jobId }, orderBy: { createdAt: "desc" }, take: 100 }),
+    prisma.inventoryBalance.findMany({
+      where: { branchId: job.branchId, item: { estimateLines: { some: { estimate: { jobId } } } } },
+      select: { itemId: true, quantityOnHand: true, quantityReserved: true },
+    }),
+  ]);
+  const actorIds = [...new Set(activityLog.map((a) => a.actorId).filter((x): x is string => !!x))];
+  const actors = await prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true } });
+  const names = new Map(actors.map((a) => [a.id, a.name]));
+  const stock = new Map<string, { onHand: number; reserved: number }>();
+  for (const b of availability) {
+    const s = stock.get(b.itemId) ?? { onHand: 0, reserved: 0 };
+    s.onHand += b.quantityOnHand;
+    s.reserved += b.quantityReserved;
+    stock.set(b.itemId, s);
+  }
+  return {
+    job,
+    full,
+    events,
+    stages: buildStageView(events, job.status),
+    activity: activityLog.map((a) => ({ ...a, actorName: a.actorId ? names.get(a.actorId) ?? "—" : "System" })),
+    stock: Object.fromEntries(stock),
+  };
+}
+
+export type StaffJobDetail = Awaited<ReturnType<typeof staffJobDetail>>;
+
+export const photoMetaInput = z.object({ stage: z.enum(["INTAKE", "INSPECTION", "REPAIR", "QUALITY"]), caption: z.string().trim().max(200).optional(), customerVisible: z.boolean().default(false) });
+
+export async function attachJobPhoto(actor: Actor, jobId: string, fileId: string, meta: z.infer<typeof photoMetaInput>) {
+  const job = await getJobForActor(actor, jobId);
+  const file = await prisma.fileObject.findUnique({ where: { id: fileId } });
+  if (!file || file.branchId !== job.branchId) throw notFound("File");
+  return prisma.servicePhoto.create({ data: { jobId, fileId, stage: meta.stage, caption: meta.caption, customerVisible: meta.customerVisible, uploadedById: actor.userId } });
+}
+
+export type { Prisma };

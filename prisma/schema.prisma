@@ -1,0 +1,1980 @@
+// Oxina Groups — Unified Operations Platform
+// Source of truth for the database. Change via `prisma migrate dev`, never by hand.
+//
+// Conventions
+// - Primary keys are UUIDs. Human-facing numbers (job, invoice, receipt...) come from NumberSequence.
+// - Every operational record carries branchId so authorization can scope queries.
+// - Money is Decimal(14,2). Quantities are integers in the item's base unit (pcs, ml, g).
+// - All timestamps are stored in UTC (timestamptz); display uses Branch.timezone.
+// - Relations to financial / audit history use onDelete: Restrict. Records are deactivated, not deleted.
+// - Extra CHECK constraints and partial indexes live in the migration SQL (see docs/DATABASE.md).
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Organisation ─────────────────────────────
+
+enum BusinessType {
+  AUTOMOTIVE_DEALERSHIP
+  HOTEL
+  RESTAURANT
+  OTHER
+}
+
+model BusinessGroup {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String
+  code          String         @unique
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  businessUnits BusinessUnit[]
+}
+
+model BusinessUnit {
+  id        String       @id @default(uuid()) @db.Uuid
+  groupId   String       @db.Uuid
+  name      String
+  code      String       @unique // short code used in document numbers, e.g. "RE"
+  type      BusinessType
+  brand     String?
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(3)
+
+  group              BusinessGroup                 @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  branches           Branch[]
+  vehicleModels      VehicleModel[]
+  inventoryItems     InventoryItem[]
+  suppliers          Supplier[]
+  offers             Offer[]
+  settings           BusinessSetting[]
+  userAssignments    UserBusinessUnitAssignment[]
+  durationStandards  RepairDurationStandard[]
+  checklistTemplates InspectionChecklistTemplate[]
+  warrantyClaims     WarrantyClaim[]
+  templates          NotificationTemplate[]
+
+  @@index([groupId])
+}
+
+model Branch {
+  id             String   @id @default(uuid()) @db.Uuid
+  businessUnitId String   @db.Uuid
+  name           String
+  code           String   @unique // e.g. "RE-CBE-01"
+  addressLine    String?
+  city           String?
+  state          String?
+  stateCode      String? // GST state code, used for place-of-supply
+  postalCode     String?
+  phone          String?
+  email          String?
+  gstin          String?
+  timezone       String   @default("Asia/Kolkata")
+  workdayStart   String   @default("09:30") // HH:mm local
+  workdayEnd     String   @default("18:30")
+  workingDays    Int[]    @default([1, 2, 3, 4, 5, 6]) // ISO weekday 1=Mon..7=Sun
+  serviceBays    Int      @default(4)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+
+  businessUnit      BusinessUnit             @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  departments       Department[]
+  userAssignments   UserBranchAssignment[]
+  employees         Employee[]
+  settings          BranchSetting[]
+  holidays          Holiday[]
+  locations         InventoryLocation[]
+  balances          InventoryBalance[]
+  vehicles          Vehicle[]
+  serviceJobs       ServiceJob[]
+  invoices          Invoice[]
+  payments          Payment[]
+  leads             SalesLead[]
+  bookings          VehicleBooking[]
+  quotations        SalesQuotation[]
+  purchaseOrders    PurchaseOrder[]
+  goodsReceipts     GoodsReceipt[]
+  transfersOut      StockTransfer[]          @relation("TransferFrom")
+  transfersIn       StockTransfer[]          @relation("TransferTo")
+  stockMovements    StockMovement[]
+  stockReservations StockReservation[]
+  sparePartRequests SparePartRequest[]
+  attendance        AttendanceRecord[]
+  leaveRequests     LeaveRequest[]
+  targets           EmployeeTarget[]
+  expenses          Expense[]
+  followUps         FollowUp[]
+  warrantyClaims    WarrantyClaim[]
+  customersCreated  Customer[]
+  durationStandards RepairDurationStandard[]
+  offers            Offer[]
+  stockAudits       StockAudit[]
+  repairTasks       RepairTask[]
+  activity          InternalActivityLog[]
+  showroomTestRides ShowroomTestRide[]
+  customerDocuments CustomerDocument[]
+  files             FileObject[]
+
+  @@index([businessUnitId, isActive])
+}
+
+model Department {
+  id        String   @id @default(uuid()) @db.Uuid
+  branchId  String   @db.Uuid
+  name      String
+  type      String // SHOWROOM | SERVICE | WAREHOUSE | ACCOUNTS | ADMIN | OTHER
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  branch    Branch     @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  employees Employee[]
+
+  @@unique([branchId, name])
+}
+
+model Holiday {
+  id       String   @id @default(uuid()) @db.Uuid
+  branchId String   @db.Uuid
+  date     DateTime @db.Date
+  name     String
+  branch   Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@unique([branchId, date])
+}
+
+// ───────────────────────────── Identity & access ─────────────────────────────
+
+enum UserType {
+  STAFF
+  CUSTOMER
+}
+
+/// GROUP = every branch; BUSINESS_UNIT = branches of assigned units; BRANCH = assigned branches; SELF = own records only.
+enum RoleScope {
+  GROUP
+  BUSINESS_UNIT
+  BRANCH
+  SELF
+}
+
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  email              String    @unique
+  username           String?   @unique
+  name               String
+  phone              String?
+  passwordHash       String
+  userType           UserType  @default(STAFF)
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime? @db.Timestamptz(3)
+  passwordChangedAt  DateTime? @db.Timestamptz(3)
+  createdAt          DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @db.Timestamptz(3)
+
+  sessions                Session[]
+  resetTokens             PasswordResetToken[]
+  roles                   UserRole[]
+  branchAssignments       UserBranchAssignment[]
+  businessUnitAssignments UserBusinessUnitAssignment[]
+  employee                Employee?
+  customer                Customer?
+  notifications           Notification[]
+  auditLogs               AuditLog[]
+  advisedJobs             ServiceJob[]                 @relation("JobAdvisor")
+  jobAssignments          ServiceJobAssignment[]       @relation("AssignmentUser")
+  assignedTasks           RepairTask[]                 @relation("TaskMechanic")
+  workLogs                MechanicWorkLog[]
+  inspections             ServiceInspection[]
+  qualityInspections      QualityInspection[]
+  testRides               TestRide[]
+  partRequests            SparePartRequest[]           @relation("PartRequester")
+  partRequestsMechanic    SparePartRequest[]           @relation("PartMechanic")
+  partIssuesIssued        SparePartIssue[]             @relation("IssueIssuer")
+  partIssuesReceived      SparePartIssue[]             @relation("IssueReceiver")
+  stockMovements          StockMovement[]
+  leadsAssigned           SalesLead[]
+  followUpsAssigned       FollowUp[]
+
+  @@index([userType, isActive])
+}
+
+model Session {
+  id        String   @id // SHA-256 of the session token; raw token only ever lives in the cookie
+  userId    String   @db.Uuid
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  ipAddress String?
+  userAgent String?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id // SHA-256 of the token
+  userId    String    @db.Uuid
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model LoginAttempt {
+  id         String   @id @default(uuid()) @db.Uuid
+  identifier String // normalised email/username
+  ipAddress  String?
+  success    Boolean
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([identifier, createdAt])
+  @@index([ipAddress, createdAt])
+}
+
+model RateLimitHit {
+  id        String   @id @default(uuid()) @db.Uuid
+  bucket    String
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([bucket, createdAt])
+}
+
+model SystemFlag {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model Role {
+  id          String           @id @default(uuid()) @db.Uuid
+  key         String           @unique // SUPER_ADMIN, BRANCH_MANAGER, ...
+  name        String
+  description String?
+  scope       RoleScope
+  isSystem    Boolean          @default(true)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(3)
+  permissions RolePermission[]
+  users       UserRole[]
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Uuid
+  key         String           @unique // e.g. "service.job.create"
+  module      String
+  description String
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId    String   @db.Uuid
+  roleId    String   @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@id([userId, roleId])
+}
+
+model UserBranchAssignment {
+  userId    String   @db.Uuid
+  branchId  String   @db.Uuid
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@id([userId, branchId])
+  @@index([branchId])
+}
+
+/// Owner / OEM representative scope: every branch of the assigned business unit.
+model UserBusinessUnitAssignment {
+  userId         String       @db.Uuid
+  businessUnitId String       @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@id([userId, businessUnitId])
+}
+
+// ───────────────────────────── Employees, attendance, targets ─────────────────────────────
+
+enum EmploymentStatus {
+  ACTIVE
+  ON_LEAVE
+  RESIGNED
+  TERMINATED
+}
+
+model Employee {
+  id                 String           @id @default(uuid()) @db.Uuid
+  employeeCode       String           @unique
+  userId             String?          @unique @db.Uuid
+  branchId           String           @db.Uuid
+  departmentId       String?          @db.Uuid
+  fullName           String
+  workEmail          String?
+  workPhone          String?
+  designation        String
+  joiningDate        DateTime         @db.Date
+  status             EmploymentStatus @default(ACTIVE)
+  reportingManagerId String?          @db.Uuid
+  createdAt          DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime         @updatedAt @db.Timestamptz(3)
+
+  user             User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  branch           Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  department       Department?        @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  reportingManager Employee?          @relation("Reporting", fields: [reportingManagerId], references: [id], onDelete: SetNull)
+  reports          Employee[]         @relation("Reporting")
+  attendance       AttendanceRecord[]
+  leaveRequests    LeaveRequest[]
+  targets          EmployeeTarget[]
+
+  @@index([branchId, status])
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  ON_LEAVE
+  HALF_DAY
+}
+
+/// Prototype attendance: self-reported clock in/out from the web app. NOT GPS / biometric verified.
+model AttendanceRecord {
+  id               String           @id @default(uuid()) @db.Uuid
+  employeeId       String           @db.Uuid
+  branchId         String           @db.Uuid
+  workDate         DateTime         @db.Date
+  clockInAt        DateTime?        @db.Timestamptz(3)
+  clockOutAt       DateTime?        @db.Timestamptz(3)
+  breakMinutes     Int              @default(0)
+  onBreakSince     DateTime?        @db.Timestamptz(3)
+  workedMinutes    Int?
+  isLate           Boolean          @default(false)
+  isEarlyDeparture Boolean          @default(false)
+  status           AttendanceStatus @default(PRESENT)
+  verification     String           @default("SELF_REPORTED_UNVERIFIED")
+  notes            String?
+  createdAt        DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime         @updatedAt @db.Timestamptz(3)
+
+  employee    Employee               @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  branch      Branch                 @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  corrections AttendanceCorrection[]
+
+  @@unique([employeeId, workDate])
+  @@index([branchId, workDate])
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model AttendanceCorrection {
+  id                String           @id @default(uuid()) @db.Uuid
+  attendanceId      String           @db.Uuid
+  requestedById     String           @db.Uuid
+  requestedClockIn  DateTime?        @db.Timestamptz(3)
+  requestedClockOut DateTime?        @db.Timestamptz(3)
+  reason            String
+  status            ApprovalStatus   @default(PENDING)
+  reviewedById      String?          @db.Uuid
+  reviewedAt        DateTime?        @db.Timestamptz(3)
+  createdAt         DateTime         @default(now()) @db.Timestamptz(3)
+  attendance        AttendanceRecord @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
+}
+
+model LeaveRequest {
+  id           String         @id @default(uuid()) @db.Uuid
+  employeeId   String         @db.Uuid
+  branchId     String         @db.Uuid
+  leaveType    String // CASUAL | SICK | EARNED | UNPAID
+  startDate    DateTime       @db.Date
+  endDate      DateTime       @db.Date
+  reason       String
+  status       ApprovalStatus @default(PENDING)
+  reviewedById String?        @db.Uuid
+  reviewedAt   DateTime?      @db.Timestamptz(3)
+  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
+  employee     Employee       @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  branch       Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@index([branchId, status])
+}
+
+model EmployeeTarget {
+  id          String   @id @default(uuid()) @db.Uuid
+  employeeId  String   @db.Uuid
+  branchId    String   @db.Uuid
+  period      String // YYYY-MM
+  metric      String // VEHICLES_SOLD | SALES_REVENUE | LEADS_CONVERTED | JOBS_COMPLETED | REQUESTS_FULFILLED
+  targetValue Decimal  @db.Decimal(14, 2)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  employee    Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  branch      Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@unique([employeeId, period, metric])
+}
+
+// ───────────────────────────── Customers ─────────────────────────────
+
+model Customer {
+  id                String   @id @default(uuid()) @db.Uuid
+  customerCode      String   @unique
+  userId            String?  @unique @db.Uuid
+  createdAtBranchId String   @db.Uuid
+  fullName          String
+  phone             String
+  email             String?
+  addressLine       String?
+  city              String?
+  stateCode         String?
+  postalCode        String?
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(3)
+
+  user              User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAtBranch   Branch             @relation(fields: [createdAtBranchId], references: [id], onDelete: Restrict)
+  consents          CustomerConsent[]
+  documents         CustomerDocument[]
+  vehicles          CustomerVehicle[]
+  serviceJobs       ServiceJob[]
+  bookings          VehicleBooking[]
+  leads             SalesLead[]
+  quotations        SalesQuotation[]
+  invoices          Invoice[]
+  payments          Payment[]
+  followUps         FollowUp[]
+  feedback          CustomerFeedback[]
+  couponRedemptions CouponRedemption[]
+
+  @@index([phone])
+  @@index([createdAtBranchId])
+}
+
+model CustomerConsent {
+  id            String    @id @default(uuid()) @db.Uuid
+  customerId    String    @db.Uuid
+  purpose       String // SERVICE_COMMUNICATION | MARKETING | DOCUMENT_PROCESSING
+  granted       Boolean
+  noticeVersion String
+  capturedById  String?   @db.Uuid
+  grantedAt     DateTime  @default(now()) @db.Timestamptz(3)
+  revokedAt     DateTime? @db.Timestamptz(3)
+  customer      Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([customerId, purpose])
+}
+
+/// Optional identity / KYC documents. Identifier is AES-256-GCM encrypted; only a masked form is shown.
+model CustomerDocument {
+  id                  String      @id @default(uuid()) @db.Uuid
+  customerId          String      @db.Uuid
+  branchId            String      @db.Uuid
+  documentType        String // AADHAAR | PAN | DRIVING_LICENCE | RC | INSURANCE | OTHER
+  purpose             String
+  identifierEncrypted String?
+  identifierMasked    String?
+  fileId              String?     @db.Uuid
+  uploadedById        String      @db.Uuid
+  retainUntil         DateTime?   @db.Date
+  createdAt           DateTime    @default(now()) @db.Timestamptz(3)
+  customer            Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  branch              Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  file                FileObject? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+}
+
+model FileObject {
+  id            String                  @id @default(uuid()) @db.Uuid
+  branchId      String                  @db.Uuid
+  storageKey    String                  @unique
+  originalName  String
+  mimeType      String
+  sizeBytes     Int
+  sha256        String
+  isSensitive   Boolean                 @default(false)
+  uploadedById  String                  @db.Uuid
+  createdAt     DateTime                @default(now()) @db.Timestamptz(3)
+  branch        Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customerDocs  CustomerDocument[]
+  servicePhotos ServicePhoto[]
+  claimDocs     WarrantyClaimDocument[]
+}
+
+// ───────────────────────────── Vehicles & showroom ─────────────────────────────
+
+model VehicleModel {
+  id             String   @id @default(uuid()) @db.Uuid
+  businessUnitId String   @db.Uuid
+  brand          String
+  name           String
+  variant        String   @default("")
+  category       String? // MOTORCYCLE | CAR | SCOOTER
+  engineCc       Int?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  businessUnit      BusinessUnit             @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  vehicles          Vehicle[]
+  customerVehicles  CustomerVehicle[]
+  leads             SalesLead[]
+  quotations        SalesQuotation[]
+  bookings          VehicleBooking[]
+  durationStandards RepairDurationStandard[]
+  showroomTestRides ShowroomTestRide[]
+
+  @@unique([businessUnitId, name, variant])
+}
+
+enum VehicleStockStatus {
+  AVAILABLE
+  RESERVED
+  BOOKING_CONFIRMED
+  AWAITING_REGISTRATION
+  ACCESSORIES_PENDING
+  READY_FOR_DELIVERY
+  DELIVERED
+  TRANSFERRED
+  RETURNED
+}
+
+/// A physical unit in showroom stock.
+model Vehicle {
+  id                   String             @id @default(uuid()) @db.Uuid
+  branchId             String             @db.Uuid
+  vehicleModelId       String             @db.Uuid
+  modelYear            Int
+  colour               String
+  vin                  String             @unique // chassis number
+  engineNumber         String             @unique
+  registrationStatus   String             @default("NOT_REGISTERED") // NOT_REGISTERED | APPLIED | REGISTERED
+  registrationNumber   String?
+  stockLocation        String?
+  status               VehicleStockStatus @default(AVAILABLE)
+  purchaseCost         Decimal            @db.Decimal(14, 2)
+  exShowroomPrice      Decimal            @db.Decimal(14, 2)
+  insuranceCharges     Decimal            @default(0) @db.Decimal(14, 2)
+  registrationCharges  Decimal            @default(0) @db.Decimal(14, 2)
+  accessoriesCharges   Decimal            @default(0) @db.Decimal(14, 2)
+  fittingCharges       Decimal            @default(0) @db.Decimal(14, 2)
+  otherCharges         Decimal            @default(0) @db.Decimal(14, 2)
+  onRoadPrice          Decimal            @db.Decimal(14, 2)
+  accessories          Json               @default("[]")
+  expectedDeliveryDate DateTime?          @db.Date
+  receivedAt           DateTime           @default(now()) @db.Timestamptz(3)
+  createdAt            DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime           @updatedAt @db.Timestamptz(3)
+
+  branch          Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  vehicleModel    VehicleModel     @relation(fields: [vehicleModelId], references: [id], onDelete: Restrict)
+  bookings        VehicleBooking[]
+  customerVehicle CustomerVehicle?
+  warranties      Warranty[]
+
+  @@index([branchId, status])
+}
+
+/// A vehicle owned by a customer (bought here or elsewhere) that comes in for service.
+model CustomerVehicle {
+  id                 String    @id @default(uuid()) @db.Uuid
+  customerId         String    @db.Uuid
+  vehicleModelId     String?   @db.Uuid
+  modelName          String
+  registrationNumber String    @unique
+  vin                String?   @unique
+  engineNumber       String?
+  purchaseDate       DateTime? @db.Date
+  lastOdometer       Int?
+  soldVehicleId      String?   @unique @db.Uuid
+  createdAt          DateTime  @default(now()) @db.Timestamptz(3)
+
+  customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  vehicleModel VehicleModel? @relation(fields: [vehicleModelId], references: [id], onDelete: SetNull)
+  soldVehicle  Vehicle?      @relation(fields: [soldVehicleId], references: [id], onDelete: SetNull)
+  serviceJobs  ServiceJob[]
+  warranties   Warranty[]
+
+  @@index([customerId])
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  TEST_RIDE_SCHEDULED
+  QUOTED
+  BOOKED
+  LOST
+}
+
+model SalesLead {
+  id                String     @id @default(uuid()) @db.Uuid
+  branchId          String     @db.Uuid
+  customerId        String?    @db.Uuid
+  name              String
+  phone             String
+  email             String?
+  interestedModelId String?    @db.Uuid
+  source            String // WALK_IN | PHONE | WEBSITE | REFERRAL | CAMPAIGN
+  status            LeadStatus @default(NEW)
+  assignedToId      String?    @db.Uuid
+  nextFollowUpAt    DateTime?  @db.Timestamptz(3)
+  lostReason        String?
+  notes             String?
+  createdAt         DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime   @updatedAt @db.Timestamptz(3)
+
+  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customer        Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  interestedModel VehicleModel?      @relation(fields: [interestedModelId], references: [id], onDelete: SetNull)
+  assignedTo      User?              @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+  activities      LeadActivity[]
+  quotations      SalesQuotation[]
+  testRides       ShowroomTestRide[]
+
+  @@index([branchId, status])
+  @@index([assignedToId, nextFollowUpAt])
+}
+
+model LeadActivity {
+  id          String    @id @default(uuid()) @db.Uuid
+  leadId      String    @db.Uuid
+  type        String // CALL | VISIT | WHATSAPP | EMAIL | NOTE | STATUS_CHANGE
+  outcome     String?
+  notes       String?
+  createdById String    @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  lead        SalesLead @relation(fields: [leadId], references: [id], onDelete: Restrict)
+
+  @@index([leadId, createdAt])
+}
+
+model ShowroomTestRide {
+  id             String       @id @default(uuid()) @db.Uuid
+  branchId       String       @db.Uuid
+  leadId         String       @db.Uuid
+  vehicleModelId String       @db.Uuid
+  scheduledAt    DateTime     @db.Timestamptz(3)
+  status         String       @default("SCHEDULED") // SCHEDULED | COMPLETED | NO_SHOW | CANCELLED
+  completedAt    DateTime?    @db.Timestamptz(3)
+  feedback       String?
+  createdById    String       @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  lead           SalesLead    @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  vehicleModel   VehicleModel @relation(fields: [vehicleModelId], references: [id], onDelete: Restrict)
+}
+
+model SalesQuotation {
+  id                  String           @id @default(uuid()) @db.Uuid
+  quotationNumber     String           @unique
+  branchId            String           @db.Uuid
+  leadId              String?          @db.Uuid
+  customerId          String?          @db.Uuid
+  vehicleModelId      String           @db.Uuid
+  exShowroomPrice     Decimal          @db.Decimal(14, 2)
+  insuranceCharges    Decimal          @default(0) @db.Decimal(14, 2)
+  registrationCharges Decimal          @default(0) @db.Decimal(14, 2)
+  accessoriesCharges  Decimal          @default(0) @db.Decimal(14, 2)
+  otherCharges        Decimal          @default(0) @db.Decimal(14, 2)
+  discountAmount      Decimal          @default(0) @db.Decimal(14, 2)
+  totalAmount         Decimal          @db.Decimal(14, 2)
+  validUntil          DateTime         @db.Date
+  status              String           @default("ISSUED") // ISSUED | ACCEPTED | EXPIRED | CANCELLED
+  createdById         String           @db.Uuid
+  createdAt           DateTime         @default(now()) @db.Timestamptz(3)
+  branch              Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  lead                SalesLead?       @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  customer            Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  vehicleModel        VehicleModel     @relation(fields: [vehicleModelId], references: [id], onDelete: Restrict)
+  bookings            VehicleBooking[]
+}
+
+enum BookingStatus {
+  RESERVED
+  CONFIRMED
+  FINANCE_PENDING
+  AWAITING_REGISTRATION
+  ACCESSORIES_PENDING
+  READY_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+model VehicleBooking {
+  id                     String        @id @default(uuid()) @db.Uuid
+  bookingNumber          String        @unique
+  branchId               String        @db.Uuid
+  customerId             String        @db.Uuid
+  vehicleModelId         String        @db.Uuid
+  vehicleId              String?       @db.Uuid
+  quotationId            String?       @db.Uuid
+  salesExecutiveId       String        @db.Uuid
+  status                 BookingStatus @default(RESERVED)
+  bookingAmount          Decimal       @default(0) @db.Decimal(14, 2)
+  totalAmount            Decimal       @db.Decimal(14, 2)
+  discountAmount         Decimal       @default(0) @db.Decimal(14, 2)
+  discountApprovedById   String?       @db.Uuid
+  couponId               String?       @db.Uuid
+  financeStatus          String        @default("NOT_REQUIRED") // NOT_REQUIRED | APPLIED | APPROVED | REJECTED | DISBURSED
+  financier              String?
+  insuranceProvider      String?
+  insurancePolicyNumber  String?
+  registrationStatus     String        @default("NOT_STARTED") // NOT_STARTED | APPLIED | COMPLETED
+  accessories            Json          @default("[]")
+  deliveryScheduledAt    DateTime?     @db.Timestamptz(3)
+  deliveryChecklist      Json          @default("{}")
+  deliveredAt            DateTime?     @db.Timestamptz(3)
+  customerAcknowledgedAt DateTime?     @db.Timestamptz(3)
+  cancelReason           String?
+  createdAt              DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime      @updatedAt @db.Timestamptz(3)
+
+  branch       Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customer     Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  vehicleModel VehicleModel    @relation(fields: [vehicleModelId], references: [id], onDelete: Restrict)
+  vehicle      Vehicle?        @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  quotation    SalesQuotation? @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  coupon       Coupon?         @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  payments     Payment[]
+  invoices     Invoice[]
+
+  @@index([branchId, status])
+  @@index([customerId])
+}
+
+model Offer {
+  id             String       @id @default(uuid()) @db.Uuid
+  businessUnitId String       @db.Uuid
+  branchId       String?      @db.Uuid // null = all branches of the unit
+  name           String
+  description    String?
+  appliesTo      String // VEHICLE_SALE | SERVICE | PARTS
+  discountType   String // PERCENT | FLAT
+  discountValue  Decimal      @db.Decimal(14, 2)
+  maxDiscount    Decimal?     @db.Decimal(14, 2)
+  minOrderValue  Decimal?     @db.Decimal(14, 2)
+  startsAt       DateTime     @db.Timestamptz(3)
+  endsAt         DateTime     @db.Timestamptz(3)
+  isActive       Boolean      @default(true)
+  createdById    String       @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  branch         Branch?      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  coupons        Coupon[]
+}
+
+model Coupon {
+  id               String             @id @default(uuid()) @db.Uuid
+  offerId          String             @db.Uuid
+  code             String             @unique
+  usageLimit       Int?
+  usedCount        Int                @default(0)
+  perCustomerLimit Int                @default(1)
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  offer            Offer              @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  redemptions      CouponRedemption[]
+  bookings         VehicleBooking[]
+}
+
+model CouponRedemption {
+  id         String   @id @default(uuid()) @db.Uuid
+  couponId   String   @db.Uuid
+  customerId String   @db.Uuid
+  bookingId  String?  @db.Uuid
+  invoiceId  String?  @db.Uuid
+  amount     Decimal  @db.Decimal(14, 2)
+  redeemedAt DateTime @default(now()) @db.Timestamptz(3)
+  coupon     Coupon   @relation(fields: [couponId], references: [id], onDelete: Restrict)
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([couponId, customerId])
+}
+
+// ───────────────────────────── Inventory & warehouse ─────────────────────────────
+
+enum ItemCategory {
+  SPARE_PART
+  ACCESSORY
+  CONSUMABLE
+  WARRANTY_REPLACEMENT
+}
+
+model InventoryItem {
+  id                String       @id @default(uuid()) @db.Uuid
+  businessUnitId    String       @db.Uuid
+  partNumber        String
+  name              String
+  description       String?
+  category          ItemCategory
+  manufacturer      String?
+  defaultSupplierId String?      @db.Uuid
+  unit              String       @default("pcs")
+  purchaseCost      Decimal      @db.Decimal(14, 2)
+  sellingPrice      Decimal      @db.Decimal(14, 2)
+  taxRatePercent    Decimal      @default(18) @db.Decimal(5, 2)
+  hsnCode           String?
+  compatibleModels  String[]     @default([])
+  isSerialized      Boolean      @default(false)
+  warrantyMonths    Int?
+  isActive          Boolean      @default(true)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
+
+  businessUnit    BusinessUnit        @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  defaultSupplier Supplier?           @relation(fields: [defaultSupplierId], references: [id], onDelete: SetNull)
+  balances        InventoryBalance[]
+  movements       StockMovement[]
+  reservations    StockReservation[]
+  partRequests    SparePartRequest[]
+  partIssues      SparePartIssue[]
+  poLines         PurchaseOrderLine[]
+  grnLines        GoodsReceiptLine[]
+  transferLines   StockTransferLine[]
+  estimateLines   EstimateLineItem[]
+  invoiceLines    InvoiceLineItem[]
+  warranties      Warranty[]
+  auditLines      StockAuditLine[]
+
+  @@unique([businessUnitId, partNumber])
+  @@index([businessUnitId, category])
+}
+
+model InventoryLocation {
+  id        String   @id @default(uuid()) @db.Uuid
+  branchId  String   @db.Uuid
+  code      String
+  name      String
+  type      String // WAREHOUSE | SERVICE_STORE | SHOWROOM | DAMAGED
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  branch       Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  balances     InventoryBalance[]
+  movements    StockMovement[]
+  reservations StockReservation[]
+  partRequests SparePartRequest[]
+  grns         GoodsReceipt[]
+  transfersOut StockTransfer[]    @relation("TransferFromLocation")
+  transfersIn  StockTransfer[]    @relation("TransferToLocation")
+  audits       StockAudit[]
+
+  @@unique([branchId, code])
+}
+
+/// quantityOnHand >= 0, quantityReserved >= 0, quantityReserved <= quantityOnHand are enforced by CHECK constraints.
+/// available = quantityOnHand - quantityReserved.
+model InventoryBalance {
+  id               String   @id @default(uuid()) @db.Uuid
+  itemId           String   @db.Uuid
+  locationId       String   @db.Uuid
+  branchId         String   @db.Uuid
+  quantityOnHand   Int      @default(0)
+  quantityReserved Int      @default(0)
+  minStockLevel    Int      @default(0)
+  reorderQuantity  Int      @default(0)
+  binLocation      String?
+  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+
+  item     InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  location InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  branch   Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@unique([itemId, locationId])
+  @@index([branchId])
+}
+
+enum StockMovementType {
+  RECEIPT
+  ISSUE
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+  TRANSFER_OUT
+  TRANSFER_IN
+  RETURN_TO_SUPPLIER
+  CUSTOMER_RETURN
+  DAMAGED
+  RESERVE
+  RELEASE
+}
+
+/// Immutable ledger. quantityDelta changes on-hand (RESERVE/RELEASE change reserved, delta recorded in reservedDelta).
+model StockMovement {
+  id            String            @id @default(uuid()) @db.Uuid
+  itemId        String            @db.Uuid
+  locationId    String            @db.Uuid
+  branchId      String            @db.Uuid
+  type          StockMovementType
+  quantityDelta Int               @default(0)
+  reservedDelta Int               @default(0)
+  onHandAfter   Int
+  reservedAfter Int
+  unitCost      Decimal?          @db.Decimal(14, 2)
+  batchNumber   String?
+  serialNumber  String?
+  reason        String?
+  referenceType String? // SERVICE_JOB | GRN | TRANSFER | ADJUSTMENT | AUDIT | RETURN
+  referenceId   String?
+  serviceJobId  String?           @db.Uuid
+  performedById String            @db.Uuid
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+
+  item        InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  location    InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  branch      Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  performedBy User              @relation(fields: [performedById], references: [id], onDelete: Restrict)
+  serviceJob  ServiceJob?       @relation(fields: [serviceJobId], references: [id], onDelete: Restrict)
+
+  @@index([itemId, locationId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([referenceType, referenceId])
+}
+
+model StockReservation {
+  id                 String            @id @default(uuid()) @db.Uuid
+  itemId             String            @db.Uuid
+  locationId         String            @db.Uuid
+  branchId           String            @db.Uuid
+  quantity           Int
+  status             String            @default("ACTIVE") // ACTIVE | CONSUMED | RELEASED
+  sparePartRequestId String?           @unique @db.Uuid
+  createdById        String            @db.Uuid
+  createdAt          DateTime          @default(now()) @db.Timestamptz(3)
+  closedAt           DateTime?         @db.Timestamptz(3)
+  item               InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  location           InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  branch             Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  sparePartRequest   SparePartRequest? @relation(fields: [sparePartRequestId], references: [id], onDelete: Restrict)
+
+  @@index([itemId, locationId, status])
+}
+
+model Supplier {
+  id             String          @id @default(uuid()) @db.Uuid
+  businessUnitId String          @db.Uuid
+  code           String
+  name           String
+  contactName    String?
+  phone          String?
+  email          String?
+  gstin          String?
+  addressLine    String?
+  leadTimeDays   Int             @default(3)
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+  businessUnit   BusinessUnit    @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  items          InventoryItem[]
+  purchaseOrders PurchaseOrder[]
+  goodsReceipts  GoodsReceipt[]
+  warrantyClaims WarrantyClaim[]
+
+  @@unique([businessUnitId, code])
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id           String              @id @default(uuid()) @db.Uuid
+  poNumber     String              @unique
+  branchId     String              @db.Uuid
+  supplierId   String              @db.Uuid
+  status       PurchaseOrderStatus @default(DRAFT)
+  expectedDate DateTime?           @db.Date
+  notes        String?
+  totalAmount  Decimal             @default(0) @db.Decimal(14, 2)
+  createdById  String              @db.Uuid
+  approvedById String?             @db.Uuid
+  approvedAt   DateTime?           @db.Timestamptz(3)
+  createdAt    DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime            @updatedAt @db.Timestamptz(3)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  lines        PurchaseOrderLine[]
+  receipts     GoodsReceipt[]
+  partRequests SparePartRequest[]
+
+  @@index([branchId, status])
+}
+
+model PurchaseOrderLine {
+  id               String             @id @default(uuid()) @db.Uuid
+  purchaseOrderId  String             @db.Uuid
+  itemId           String             @db.Uuid
+  quantity         Int
+  receivedQuantity Int                @default(0)
+  unitCost         Decimal            @db.Decimal(14, 2)
+  purchaseOrder    PurchaseOrder      @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  item             InventoryItem      @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  grnLines         GoodsReceiptLine[]
+}
+
+model GoodsReceipt {
+  id              String             @id @default(uuid()) @db.Uuid
+  grnNumber       String             @unique
+  branchId        String             @db.Uuid
+  supplierId      String             @db.Uuid
+  purchaseOrderId String?            @db.Uuid
+  locationId      String             @db.Uuid
+  supplierInvoice String?
+  receivedById    String             @db.Uuid
+  receivedAt      DateTime           @default(now()) @db.Timestamptz(3)
+  notes           String?
+  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  supplier        Supplier           @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  purchaseOrder   PurchaseOrder?     @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  location        InventoryLocation  @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  lines           GoodsReceiptLine[]
+}
+
+model GoodsReceiptLine {
+  id             String             @id @default(uuid()) @db.Uuid
+  goodsReceiptId String             @db.Uuid
+  itemId         String             @db.Uuid
+  poLineId       String?            @db.Uuid
+  quantity       Int
+  unitCost       Decimal            @db.Decimal(14, 2)
+  batchNumber    String?
+  goodsReceipt   GoodsReceipt       @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict)
+  item           InventoryItem      @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  poLine         PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
+}
+
+enum TransferStatus {
+  REQUESTED
+  APPROVED
+  DISPATCHED
+  RECEIVED
+  CANCELLED
+}
+
+model StockTransfer {
+  id             String              @id @default(uuid()) @db.Uuid
+  transferNumber String              @unique
+  fromBranchId   String              @db.Uuid
+  toBranchId     String              @db.Uuid
+  fromLocationId String              @db.Uuid
+  toLocationId   String              @db.Uuid
+  status         TransferStatus      @default(REQUESTED)
+  notes          String?
+  requestedById  String              @db.Uuid
+  approvedById   String?             @db.Uuid
+  dispatchedById String?             @db.Uuid
+  dispatchedAt   DateTime?           @db.Timestamptz(3)
+  receivedById   String?             @db.Uuid
+  receivedAt     DateTime?           @db.Timestamptz(3)
+  createdAt      DateTime            @default(now()) @db.Timestamptz(3)
+  fromBranch     Branch              @relation("TransferFrom", fields: [fromBranchId], references: [id], onDelete: Restrict)
+  toBranch       Branch              @relation("TransferTo", fields: [toBranchId], references: [id], onDelete: Restrict)
+  fromLocation   InventoryLocation   @relation("TransferFromLocation", fields: [fromLocationId], references: [id], onDelete: Restrict)
+  toLocation     InventoryLocation   @relation("TransferToLocation", fields: [toLocationId], references: [id], onDelete: Restrict)
+  lines          StockTransferLine[]
+  partRequests   SparePartRequest[]
+}
+
+model StockTransferLine {
+  id               String        @id @default(uuid()) @db.Uuid
+  transferId       String        @db.Uuid
+  itemId           String        @db.Uuid
+  quantity         Int
+  receivedQuantity Int           @default(0)
+  transfer         StockTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  item             InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+}
+
+model StockAudit {
+  id          String            @id @default(uuid()) @db.Uuid
+  branchId    String            @db.Uuid
+  locationId  String            @db.Uuid
+  status      String            @default("IN_PROGRESS") // IN_PROGRESS | COMPLETED
+  startedById String            @db.Uuid
+  startedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  completedAt DateTime?         @db.Timestamptz(3)
+  branch      Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  location    InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  lines       StockAuditLine[]
+}
+
+model StockAuditLine {
+  id         String        @id @default(uuid()) @db.Uuid
+  auditId    String        @db.Uuid
+  itemId     String        @db.Uuid
+  systemQty  Int
+  countedQty Int
+  audit      StockAudit    @relation(fields: [auditId], references: [id], onDelete: Restrict)
+  item       InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([auditId, itemId])
+}
+
+// ───────────────────────────── Service centre ─────────────────────────────
+
+enum ServiceJobStatus {
+  RECEIVED
+  INSPECTION
+  AWAITING_APPROVAL
+  APPROVED
+  PARTS_PENDING
+  IN_REPAIR
+  QUALITY_CHECK
+  FINAL_BILLING
+  READY_FOR_DELIVERY
+  DELIVERED
+  CLOSED
+  CANCELLED
+}
+
+enum ServiceType {
+  PERIODIC_SERVICE
+  FREE_SERVICE
+  GENERAL_REPAIR
+  ACCIDENT_REPAIR
+  WARRANTY_REPAIR
+  BREAKDOWN
+  INSPECTION_ONLY
+}
+
+model ServiceJob {
+  id                     String           @id @default(uuid()) @db.Uuid
+  jobNumber              String           @unique
+  branchId               String           @db.Uuid
+  customerId             String           @db.Uuid
+  customerVehicleId      String           @db.Uuid
+  serviceAdvisorId       String           @db.Uuid
+  status                 ServiceJobStatus @default(RECEIVED)
+  serviceType            ServiceType
+  isEmergency            Boolean          @default(false)
+  odometerIn             Int
+  odometerOut            Int?
+  fuelLevel              String // EMPTY | QUARTER | HALF | THREE_QUARTER | FULL
+  reportedProblems       String
+  vehicleCondition       String?
+  existingDamage         String?
+  accessoriesReceived    String[]         @default([])
+  customerAcknowledgedAt DateTime?        @db.Timestamptz(3)
+  receivedAt             DateTime         @default(now()) @db.Timestamptz(3)
+  expectedCompletionAt   DateTime?        @db.Timestamptz(3) // advisor's initial estimate at intake
+  etaEarliest            DateTime?        @db.Timestamptz(3)
+  etaLatest              DateTime?        @db.Timestamptz(3)
+  etaConfidence          String? // FIRM | RANGE | PROVISIONAL | UNKNOWN
+  etaBreakdown           Json?
+  etaUpdatedAt           DateTime?        @db.Timestamptz(3)
+  readyAt                DateTime?        @db.Timestamptz(3)
+  deliveredAt            DateTime?        @db.Timestamptz(3)
+  closedAt               DateTime?        @db.Timestamptz(3)
+  cancelReason           String?
+  version                Int              @default(0)
+  createdAt              DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime         @updatedAt @db.Timestamptz(3)
+
+  branch             Branch                 @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customer           Customer               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customerVehicle    CustomerVehicle        @relation(fields: [customerVehicleId], references: [id], onDelete: Restrict)
+  serviceAdvisor     User                   @relation("JobAdvisor", fields: [serviceAdvisorId], references: [id], onDelete: Restrict)
+  assignments        ServiceJobAssignment[]
+  inspections        ServiceInspection[]
+  tasks              RepairTask[]
+  estimates          RepairEstimate[]
+  partRequests       SparePartRequest[]
+  qualityInspections QualityInspection[]
+  testRides          TestRide[]
+  invoices           Invoice[]
+  timeline           ServiceTimelineEvent[]
+  activity           InternalActivityLog[]
+  photos             ServicePhoto[]
+  followUps          FollowUp[]
+  feedback           CustomerFeedback?
+  handover           ServiceHandover?
+  stockMovements     StockMovement[]
+  warrantyClaims     WarrantyClaim[]
+
+  @@index([branchId, status])
+  @@index([customerId])
+  @@index([customerVehicleId])
+  @@index([branchId, receivedAt])
+}
+
+enum AssignmentRole {
+  ADVISOR
+  EXAMINER
+  MECHANIC
+  INSPECTOR
+  BILLING
+}
+
+model ServiceJobAssignment {
+  id           String         @id @default(uuid()) @db.Uuid
+  jobId        String         @db.Uuid
+  userId       String         @db.Uuid
+  role         AssignmentRole
+  assignedById String         @db.Uuid
+  assignedAt   DateTime       @default(now()) @db.Timestamptz(3)
+  releasedAt   DateTime?      @db.Timestamptz(3)
+  job          ServiceJob     @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  user         User           @relation("AssignmentUser", fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([jobId, role])
+  @@index([userId, releasedAt])
+}
+
+model InspectionChecklistTemplate {
+  id             String       @id @default(uuid()) @db.Uuid
+  businessUnitId String       @db.Uuid
+  kind           String // DIAGNOSIS | QUALITY
+  name           String
+  items          Json // [{ key, label, mandatory, safetyCritical }]
+  isActive       Boolean      @default(true)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([businessUnitId, kind, name])
+}
+
+model ServiceInspection {
+  id              String     @id @default(uuid()) @db.Uuid
+  jobId           String     @db.Uuid
+  examinerId      String     @db.Uuid
+  checklist       Json       @default("[]") // [{ key, label, result: OK|ATTENTION|FAIL|NA, notes }]
+  findings        String?
+  safetyCritical  Boolean    @default(false)
+  customerSummary String? // customer-visible
+  internalNotes   String? // never shown to customers
+  startedAt       DateTime   @default(now()) @db.Timestamptz(3)
+  completedAt     DateTime?  @db.Timestamptz(3)
+  job             ServiceJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  examiner        User       @relation(fields: [examinerId], references: [id], onDelete: Restrict)
+
+  @@index([jobId])
+}
+
+enum RepairTaskStatus {
+  PENDING
+  READY
+  IN_PROGRESS
+  PAUSED
+  BLOCKED
+  COMPLETED
+  CANCELLED
+}
+
+model RepairTask {
+  id                  String           @id @default(uuid()) @db.Uuid
+  jobId               String           @db.Uuid
+  branchId            String           @db.Uuid
+  taskKey             String? // links to RepairDurationStandard.taskKey
+  title               String
+  description         String?
+  status              RepairTaskStatus @default(PENDING)
+  origin              String           @default("INITIAL") // INITIAL | SUPPLEMENTARY | QC_REWORK
+  requiresApproval    Boolean          @default(true)
+  approved            Boolean          @default(false)
+  isOptional          Boolean          @default(false)
+  isSafetyCritical    Boolean          @default(false)
+  estimatedMinMinutes Int
+  estimatedMaxMinutes Int
+  labourCharge        Decimal          @default(0) @db.Decimal(14, 2)
+  assignedMechanicId  String?          @db.Uuid
+  startedAt           DateTime?        @db.Timestamptz(3)
+  lastResumedAt       DateTime?        @db.Timestamptz(3)
+  workedMinutes       Int              @default(0)
+  completedAt         DateTime?        @db.Timestamptz(3)
+  holdReason          String?
+  reworkCount         Int              @default(0)
+  sequence            Int              @default(0)
+  version             Int              @default(0)
+  createdAt           DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime         @updatedAt @db.Timestamptz(3)
+
+  job              ServiceJob             @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  branch           Branch                 @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  assignedMechanic User?                  @relation("TaskMechanic", fields: [assignedMechanicId], references: [id], onDelete: SetNull)
+  dependencies     RepairTaskDependency[] @relation("TaskDependsOn")
+  dependents       RepairTaskDependency[] @relation("TaskDependent")
+  workLogs         MechanicWorkLog[]
+  partRequests     SparePartRequest[]
+  estimateLines    EstimateLineItem[]
+
+  @@index([jobId, status])
+  @@index([assignedMechanicId, status])
+}
+
+model RepairTaskDependency {
+  taskId          String     @db.Uuid
+  dependsOnTaskId String     @db.Uuid
+  task            RepairTask @relation("TaskDependsOn", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOn       RepairTask @relation("TaskDependent", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, dependsOnTaskId])
+}
+
+enum EstimateStatus {
+  DRAFT
+  SENT
+  PARTIALLY_APPROVED
+  APPROVED
+  REJECTED
+  SUPERSEDED
+}
+
+model RepairEstimate {
+  id                   String             @id @default(uuid()) @db.Uuid
+  estimateNumber       String             @unique
+  jobId                String             @db.Uuid
+  kind                 String             @default("INITIAL") // INITIAL | SUPPLEMENTARY
+  status               EstimateStatus     @default(DRAFT)
+  labourTotal          Decimal            @default(0) @db.Decimal(14, 2)
+  partsTotal           Decimal            @default(0) @db.Decimal(14, 2)
+  discountTotal        Decimal            @default(0) @db.Decimal(14, 2)
+  taxTotal             Decimal            @default(0) @db.Decimal(14, 2)
+  grandTotal           Decimal            @default(0) @db.Decimal(14, 2)
+  approvedTotal        Decimal            @default(0) @db.Decimal(14, 2)
+  expectedCompletionAt DateTime?          @db.Timestamptz(3)
+  customerNote         String?
+  preparedById         String             @db.Uuid
+  sentAt               DateTime?          @db.Timestamptz(3)
+  decidedAt            DateTime?          @db.Timestamptz(3)
+  createdAt            DateTime           @default(now()) @db.Timestamptz(3)
+  job                  ServiceJob         @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  lines                EstimateLineItem[]
+  approvals            CustomerApproval[]
+
+  @@index([jobId])
+}
+
+model EstimateLineItem {
+  id              String             @id @default(uuid()) @db.Uuid
+  estimateId      String             @db.Uuid
+  repairTaskId    String?            @db.Uuid
+  type            String // LABOUR | PART | OTHER
+  description     String
+  inventoryItemId String?            @db.Uuid
+  quantity        Int                @default(1)
+  unitPrice       Decimal            @db.Decimal(14, 2)
+  discount        Decimal            @default(0) @db.Decimal(14, 2)
+  taxRatePercent  Decimal            @default(18) @db.Decimal(5, 2)
+  taxAmount       Decimal            @default(0) @db.Decimal(14, 2)
+  lineTotal       Decimal            @db.Decimal(14, 2)
+  isOptional      Boolean            @default(false)
+  approvalStatus  ApprovalStatus     @default(PENDING)
+  estimate        RepairEstimate     @relation(fields: [estimateId], references: [id], onDelete: Restrict)
+  repairTask      RepairTask?        @relation(fields: [repairTaskId], references: [id], onDelete: SetNull)
+  inventoryItem   InventoryItem?     @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  approvals       CustomerApproval[]
+  partRequest     SparePartRequest?
+}
+
+model CustomerApproval {
+  id               String            @id @default(uuid()) @db.Uuid
+  estimateId       String            @db.Uuid
+  lineItemId       String?           @db.Uuid
+  decision         ApprovalStatus
+  channel          String // PORTAL | IN_PERSON | PHONE
+  decidedByUserId  String?           @db.Uuid // customer portal user
+  recordedByUserId String?           @db.Uuid // staff member recording an in-person/phone decision
+  notes            String?
+  ipAddress        String?
+  decidedAt        DateTime          @default(now()) @db.Timestamptz(3)
+  estimate         RepairEstimate    @relation(fields: [estimateId], references: [id], onDelete: Restrict)
+  lineItem         EstimateLineItem? @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+
+  @@index([estimateId])
+}
+
+enum PartRequestStatus {
+  REQUESTED
+  RESERVED
+  PICKING
+  PICKED
+  ISSUED
+  UNAVAILABLE
+  AWAITING_PROCUREMENT
+  CANCELLED
+}
+
+model SparePartRequest {
+  id                  String            @id @default(uuid()) @db.Uuid
+  requestNumber       String            @unique
+  jobId               String            @db.Uuid
+  branchId            String            @db.Uuid
+  repairTaskId        String?           @db.Uuid
+  estimateLineId      String?           @unique @db.Uuid
+  itemId              String            @db.Uuid
+  locationId          String            @db.Uuid
+  quantity            Int
+  priority            String            @default("NORMAL") // LOW | NORMAL | HIGH | URGENT
+  status              PartRequestStatus @default(REQUESTED)
+  requestedById       String            @db.Uuid
+  assignedMechanicId  String?           @db.Uuid
+  availableAtRequest  Int // snapshot of available qty when requested
+  expectedAvailableAt DateTime?         @db.Timestamptz(3)
+  procurementNote     String?
+  purchaseOrderId     String?           @db.Uuid
+  transferId          String?           @db.Uuid
+  version             Int               @default(0)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
+
+  job              ServiceJob        @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  repairTask       RepairTask?       @relation(fields: [repairTaskId], references: [id], onDelete: SetNull)
+  estimateLine     EstimateLineItem? @relation(fields: [estimateLineId], references: [id], onDelete: Restrict)
+  item             InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  location         InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  requestedBy      User              @relation("PartRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  assignedMechanic User?             @relation("PartMechanic", fields: [assignedMechanicId], references: [id], onDelete: SetNull)
+  purchaseOrder    PurchaseOrder?    @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
+  transfer         StockTransfer?    @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  reservation      StockReservation?
+  issue            SparePartIssue?
+
+  @@index([branchId, status])
+  @@index([jobId])
+}
+
+/// One issue per request (unique requestId) — the database itself rejects duplicate issues.
+model SparePartIssue {
+  id                   String           @id @default(uuid()) @db.Uuid
+  requestId            String           @unique @db.Uuid
+  itemId               String           @db.Uuid
+  locationId           String           @db.Uuid
+  quantity             Int
+  unitPrice            Decimal          @db.Decimal(14, 2)
+  issuedById           String           @db.Uuid
+  receivedByMechanicId String           @db.Uuid
+  issuedAt             DateTime         @default(now()) @db.Timestamptz(3)
+  request              SparePartRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  item                 InventoryItem    @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  issuedBy             User             @relation("IssueIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+  receivedBy           User             @relation("IssueReceiver", fields: [receivedByMechanicId], references: [id], onDelete: Restrict)
+  warranties           Warranty[]
+}
+
+model MechanicWorkLog {
+  id            String           @id @default(uuid()) @db.Uuid
+  taskId        String           @db.Uuid
+  mechanicId    String           @db.Uuid
+  fromStatus    RepairTaskStatus
+  toStatus      RepairTaskStatus
+  reason        String?
+  minutesWorked Int              @default(0)
+  createdAt     DateTime         @default(now()) @db.Timestamptz(3)
+  task          RepairTask       @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  mechanic      User             @relation(fields: [mechanicId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, createdAt])
+  @@index([mechanicId, createdAt])
+}
+
+model QualityInspection {
+  id               String     @id @default(uuid()) @db.Uuid
+  jobId            String     @db.Uuid
+  inspectorId      String     @db.Uuid
+  checklist        Json       @default("[]") // [{ key, label, mandatory, safetyCritical, result: PASS|FAIL|NA, notes }]
+  testRideRequired Boolean    @default(true)
+  result           String     @default("PENDING") // PENDING | PASSED | FAILED
+  failureReason    String?
+  returnedTaskIds  String[]   @default([])
+  notes            String?
+  startedAt        DateTime   @default(now()) @db.Timestamptz(3)
+  completedAt      DateTime?  @db.Timestamptz(3)
+  job              ServiceJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  inspector        User       @relation(fields: [inspectorId], references: [id], onDelete: Restrict)
+  testRides        TestRide[]
+
+  @@index([jobId])
+}
+
+model TestRide {
+  id                  String             @id @default(uuid()) @db.Uuid
+  jobId               String             @db.Uuid
+  qualityInspectionId String?            @db.Uuid
+  riderId             String             @db.Uuid
+  startedAt           DateTime           @db.Timestamptz(3)
+  endedAt             DateTime?          @db.Timestamptz(3)
+  odometerStart       Int
+  odometerEnd         Int?
+  observations        String?
+  result              String             @default("IN_PROGRESS") // IN_PROGRESS | OK | ISSUES_FOUND
+  job                 ServiceJob         @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  qualityInspection   QualityInspection? @relation(fields: [qualityInspectionId], references: [id], onDelete: SetNull)
+  rider               User               @relation(fields: [riderId], references: [id], onDelete: Restrict)
+}
+
+model ServiceHandover {
+  id                   String     @id @default(uuid()) @db.Uuid
+  jobId                String     @unique @db.Uuid
+  handedOverById       String     @db.Uuid
+  recipientName        String
+  recipientRelation    String     @default("OWNER")
+  odometerOut          Int
+  checklist            Json       @default("{}")
+  customerAcknowledged Boolean    @default(false)
+  notes                String?
+  handedOverAt         DateTime   @default(now()) @db.Timestamptz(3)
+  job                  ServiceJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+}
+
+model ServicePhoto {
+  id              String     @id @default(uuid()) @db.Uuid
+  jobId           String     @db.Uuid
+  fileId          String     @db.Uuid
+  stage           String // INTAKE | INSPECTION | REPAIR | QUALITY
+  caption         String?
+  customerVisible Boolean    @default(false)
+  uploadedById    String     @db.Uuid
+  createdAt       DateTime   @default(now()) @db.Timestamptz(3)
+  job             ServiceJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  file            FileObject @relation(fields: [fileId], references: [id], onDelete: Restrict)
+}
+
+/// Customer-visible timeline. Content here is written for customers — never internal notes.
+model ServiceTimelineEvent {
+  id                 String     @id @default(uuid()) @db.Uuid
+  jobId              String     @db.Uuid
+  stage              String // VEHICLE_RECEIVED | INSPECTION | ... see src/lib/service/stages.ts
+  state              String // COMPLETED | ACTIVE | BLOCKED | FAILED | INFO
+  title              String
+  customerNote       String?
+  actorName          String?
+  actorRole          String?
+  nextExpectedAction String?
+  etaEarliest        DateTime?  @db.Timestamptz(3)
+  etaLatest          DateTime?  @db.Timestamptz(3)
+  occurredAt         DateTime   @default(now()) @db.Timestamptz(3)
+  job                ServiceJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@index([jobId, occurredAt])
+}
+
+/// Internal operational log (staff only).
+model InternalActivityLog {
+  id        String      @id @default(uuid()) @db.Uuid
+  branchId  String      @db.Uuid
+  jobId     String?     @db.Uuid
+  actorId   String?     @db.Uuid
+  action    String
+  details   Json?
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+  branch    Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  job       ServiceJob? @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@index([branchId, createdAt])
+  @@index([jobId, createdAt])
+}
+
+/// Configurable task durations (minutes). Most specific match wins: branch+model > branch > model > unit default.
+model RepairDurationStandard {
+  id             String        @id @default(uuid()) @db.Uuid
+  businessUnitId String        @db.Uuid
+  branchId       String?       @db.Uuid
+  vehicleModelId String?       @db.Uuid
+  taskKey        String
+  label          String
+  minMinutes     Int
+  maxMinutes     Int
+  defaultLabour  Decimal       @default(0) @db.Decimal(14, 2)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(3)
+  businessUnit   BusinessUnit  @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  branch         Branch?       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  vehicleModel   VehicleModel? @relation(fields: [vehicleModelId], references: [id], onDelete: Restrict)
+
+  @@index([businessUnitId, taskKey])
+}
+
+// ───────────────────────────── Billing ─────────────────────────────
+
+enum InvoiceStatus {
+  DRAFT
+  FINALIZED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+/// Once FINALIZED, monetary fields and lines are immutable (enforced in the service layer and by a DB trigger).
+model Invoice {
+  id             String        @id @default(uuid()) @db.Uuid
+  invoiceNumber  String?       @unique // assigned on finalization
+  branchId       String        @db.Uuid
+  kind           String // SERVICE | VEHICLE_SALE | PARTS_COUNTER
+  serviceJobId   String?       @db.Uuid
+  bookingId      String?       @db.Uuid
+  customerId     String        @db.Uuid
+  status         InvoiceStatus @default(DRAFT)
+  placeOfSupply  String?
+  subtotal       Decimal       @default(0) @db.Decimal(14, 2)
+  discountTotal  Decimal       @default(0) @db.Decimal(14, 2)
+  cgstTotal      Decimal       @default(0) @db.Decimal(14, 2)
+  sgstTotal      Decimal       @default(0) @db.Decimal(14, 2)
+  igstTotal      Decimal       @default(0) @db.Decimal(14, 2)
+  taxTotal       Decimal       @default(0) @db.Decimal(14, 2)
+  grandTotal     Decimal       @default(0) @db.Decimal(14, 2)
+  amountPaid     Decimal       @default(0) @db.Decimal(14, 2)
+  creditedAmount Decimal       @default(0) @db.Decimal(14, 2)
+  balanceDue     Decimal       @default(0) @db.Decimal(14, 2)
+  notes          String?
+  createdById    String        @db.Uuid
+  finalizedById  String?       @db.Uuid
+  finalizedAt    DateTime?     @db.Timestamptz(3)
+  cancelledAt    DateTime?     @db.Timestamptz(3)
+  cancelReason   String?
+  createdAt      DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(3)
+
+  branch      Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  serviceJob  ServiceJob?       @relation(fields: [serviceJobId], references: [id], onDelete: Restrict)
+  booking     VehicleBooking?   @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  customer    Customer          @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lines       InvoiceLineItem[]
+  payments    Payment[]
+  creditNotes CreditNote[]
+
+  @@index([branchId, status])
+  @@index([customerId])
+  @@index([serviceJobId])
+}
+
+model InvoiceLineItem {
+  id              String         @id @default(uuid()) @db.Uuid
+  invoiceId       String         @db.Uuid
+  type            String // LABOUR | PART | VEHICLE | OTHER
+  description     String
+  inventoryItemId String?        @db.Uuid
+  hsnSac          String?
+  quantity        Int
+  unitPrice       Decimal        @db.Decimal(14, 2)
+  discount        Decimal        @default(0) @db.Decimal(14, 2)
+  taxRatePercent  Decimal        @db.Decimal(5, 2)
+  taxAmount       Decimal        @db.Decimal(14, 2)
+  lineTotal       Decimal        @db.Decimal(14, 2)
+  sourceType      String? // ESTIMATE_LINE | PART_ISSUE | TASK
+  sourceId        String?
+  invoice         Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  inventoryItem   InventoryItem? @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+}
+
+enum PaymentStatus {
+  PENDING_CONFIRMATION
+  CONFIRMED
+  FAILED
+  REVERSED
+}
+
+/// Never stores card numbers or payment credentials — only the method and a transaction reference.
+model Payment {
+  id            String          @id @default(uuid()) @db.Uuid
+  receiptNumber String?         @unique // assigned on confirmation
+  branchId      String          @db.Uuid
+  customerId    String          @db.Uuid
+  invoiceId     String?         @db.Uuid
+  bookingId     String?         @db.Uuid
+  amount        Decimal         @db.Decimal(14, 2)
+  method        String // CASH | UPI | CARD | BANK_TRANSFER | CHEQUE | FINANCE
+  reference     String?
+  status        PaymentStatus   @default(PENDING_CONFIRMATION)
+  recordedById  String          @db.Uuid
+  confirmedById String?         @db.Uuid
+  confirmedAt   DateTime?       @db.Timestamptz(3)
+  notes         String?
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+  branch        Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customer      Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  invoice       Invoice?        @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  booking       VehicleBooking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  refunds       Refund[]
+
+  @@index([branchId, createdAt])
+  @@index([invoiceId])
+}
+
+model Refund {
+  id            String    @id @default(uuid()) @db.Uuid
+  paymentId     String    @db.Uuid
+  amount        Decimal   @db.Decimal(14, 2)
+  reason        String
+  status        String    @default("REQUESTED") // REQUESTED | APPROVED | PROCESSED | REJECTED
+  requestedById String    @db.Uuid
+  approvedById  String?   @db.Uuid
+  processedAt   DateTime? @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  payment       Payment   @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+}
+
+model CreditNote {
+  id               String   @id @default(uuid()) @db.Uuid
+  creditNoteNumber String   @unique
+  invoiceId        String   @db.Uuid
+  amount           Decimal  @db.Decimal(14, 2)
+  reason           String
+  issuedById       String   @db.Uuid
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  invoice          Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+}
+
+model Expense {
+  id            String         @id @default(uuid()) @db.Uuid
+  branchId      String         @db.Uuid
+  category      String
+  description   String
+  amount        Decimal        @db.Decimal(14, 2)
+  incurredOn    DateTime       @db.Date
+  status        ApprovalStatus @default(PENDING)
+  submittedById String         @db.Uuid
+  reviewedById  String?        @db.Uuid
+  reviewedAt    DateTime?      @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  branch        Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@index([branchId, incurredOn])
+}
+
+/// Controlled document numbering. Incremented atomically with UPDATE ... RETURNING.
+model NumberSequence {
+  key       String   @id // e.g. "JOB:RE:2026"
+  nextValue Int      @default(1)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+
+// ───────────────────────────── Warranty ─────────────────────────────
+
+model Warranty {
+  id                String           @id @default(uuid()) @db.Uuid
+  type              String // VEHICLE | PART
+  vehicleId         String?          @db.Uuid
+  customerVehicleId String?          @db.Uuid
+  inventoryItemId   String?          @db.Uuid
+  sparePartIssueId  String?          @db.Uuid
+  startDate         DateTime         @db.Date
+  endDate           DateTime         @db.Date
+  terms             String?
+  createdAt         DateTime         @default(now()) @db.Timestamptz(3)
+  vehicle           Vehicle?         @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  customerVehicle   CustomerVehicle? @relation(fields: [customerVehicleId], references: [id], onDelete: Restrict)
+  inventoryItem     InventoryItem?   @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  sparePartIssue    SparePartIssue?  @relation(fields: [sparePartIssueId], references: [id], onDelete: Restrict)
+  claims            WarrantyClaim[]
+}
+
+enum WarrantyClaimStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  SETTLED
+}
+
+model WarrantyClaim {
+  id               String                  @id @default(uuid()) @db.Uuid
+  claimNumber      String                  @unique
+  branchId         String                  @db.Uuid
+  businessUnitId   String                  @db.Uuid
+  warrantyId       String?                 @db.Uuid
+  serviceJobId     String?                 @db.Uuid
+  supplierId       String?                 @db.Uuid
+  manufacturer     String
+  claimType        String // VEHICLE | PART
+  description      String
+  status           WarrantyClaimStatus     @default(DRAFT)
+  claimAmount      Decimal                 @default(0) @db.Decimal(14, 2)
+  reimbursedAmount Decimal?                @db.Decimal(14, 2)
+  decisionReason   String?
+  submittedAt      DateTime?               @db.Timestamptz(3)
+  resolvedAt       DateTime?               @db.Timestamptz(3)
+  createdById      String                  @db.Uuid
+  createdAt        DateTime                @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime                @updatedAt @db.Timestamptz(3)
+  branch           Branch                  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  businessUnit     BusinessUnit            @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+  warranty         Warranty?               @relation(fields: [warrantyId], references: [id], onDelete: Restrict)
+  serviceJob       ServiceJob?             @relation(fields: [serviceJobId], references: [id], onDelete: Restrict)
+  supplier         Supplier?               @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  documents        WarrantyClaimDocument[]
+
+  @@index([branchId, status])
+  @@index([businessUnitId, status])
+}
+
+model WarrantyClaimDocument {
+  claimId String        @db.Uuid
+  fileId  String        @db.Uuid
+  claim   WarrantyClaim @relation(fields: [claimId], references: [id], onDelete: Restrict)
+  file    FileObject    @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@id([claimId, fileId])
+}
+
+// ───────────────────────────── Notifications, follow-ups, feedback ─────────────────────────────
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  branchId  String?   @db.Uuid
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+}
+
+model NotificationTemplate {
+  id             String        @id @default(uuid()) @db.Uuid
+  key            String // PART_UNAVAILABLE | READY_FOR_DELIVERY | ...
+  channel        String // EMAIL | SMS | WHATSAPP | IN_APP
+  businessUnitId String?       @db.Uuid
+  subject        String?
+  body           String
+  isActive       Boolean       @default(true)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(3)
+  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([key, channel, businessUnitId])
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENDING
+  SENT // accepted by provider
+  DELIVERED // provider confirmed delivery
+  FAILED
+  SKIPPED_NO_PROVIDER
+}
+
+/// Outbox / job queue for external messages, processed by `npm run worker`.
+model NotificationDelivery {
+  id                String         @id @default(uuid()) @db.Uuid
+  channel           String
+  recipient         String
+  templateKey       String
+  subject           String?
+  body              String
+  branchId          String?        @db.Uuid
+  customerId        String?        @db.Uuid
+  serviceJobId      String?        @db.Uuid
+  status            DeliveryStatus @default(QUEUED)
+  attempts          Int            @default(0)
+  nextAttemptAt     DateTime       @default(now()) @db.Timestamptz(3)
+  providerMessageId String?
+  lastError         String?
+  sentAt            DateTime?      @db.Timestamptz(3)
+  deliveredAt       DateTime?      @db.Timestamptz(3)
+  createdAt         DateTime       @default(now()) @db.Timestamptz(3)
+
+  @@index([status, nextAttemptAt])
+}
+
+model FollowUp {
+  id           String      @id @default(uuid()) @db.Uuid
+  branchId     String      @db.Uuid
+  customerId   String      @db.Uuid
+  serviceJobId String?     @db.Uuid
+  type         String // NEXT_DAY | THREE_DAY | SERVICE_REMINDER | WARRANTY | FEEDBACK
+  dueAt        DateTime    @db.Timestamptz(3)
+  status       String      @default("PENDING") // PENDING | COMPLETED | NO_ANSWER | RESCHEDULED | CANCELLED
+  assignedToId String?     @db.Uuid
+  attempts     Int         @default(0)
+  outcome      String?
+  notes        String?
+  nextDueAt    DateTime?   @db.Timestamptz(3)
+  completedAt  DateTime?   @db.Timestamptz(3)
+  createdAt    DateTime    @default(now()) @db.Timestamptz(3)
+  branch       Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  customer     Customer    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  serviceJob   ServiceJob? @relation(fields: [serviceJobId], references: [id], onDelete: Restrict)
+  assignedTo   User?       @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, status, dueAt])
+}
+
+model CustomerFeedback {
+  id           String     @id @default(uuid()) @db.Uuid
+  serviceJobId String     @unique @db.Uuid
+  customerId   String     @db.Uuid
+  rating       Int
+  comments     String?
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+  serviceJob   ServiceJob @relation(fields: [serviceJobId], references: [id], onDelete: Restrict)
+  customer     Customer   @relation(fields: [customerId], references: [id], onDelete: Restrict)
+}
+
+// ───────────────────────────── Audit & settings ─────────────────────────────
+
+/// Append-only (UPDATE/DELETE blocked by trigger).
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @db.Uuid
+  action     String
+  entityType String
+  entityId   String?
+  branchId   String?  @db.Uuid
+  before     Json?
+  after      Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([branchId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([createdAt])
+}
+
+model BusinessSetting {
+  id             String       @id @default(uuid()) @db.Uuid
+  businessUnitId String       @db.Uuid
+  key            String
+  value          Json
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  businessUnit   BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([businessUnitId, key])
+}
+
+model BranchSetting {
+  id        String   @id @default(uuid()) @db.Uuid
+  branchId  String   @db.Uuid
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  @@unique([branchId, key])
+}
