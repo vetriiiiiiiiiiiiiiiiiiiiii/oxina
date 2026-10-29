@@ -92,12 +92,47 @@ async function as(userId: string) {
   return actorCache.get(userId)!;
 }
 
+/** Plain-language reasons shown to customers for the demo repairs (fills only where missing). */
+const DEMO_REASONS: Record<string, string> = {
+  "General periodic service": "Due at this mileage: fresh oil and filter, spark plug, and a full check of brakes, chain, lights and fasteners.",
+  "Front brake pad replacement": "Front pads are worn to about 20%. Braking distance increases and the disc can get damaged if left.",
+  "Clutch plate replacement": "The clutch slips when you accelerate because the plates are worn past their limit. It will get worse and can leave you stranded.",
+  "Chain cleaning and adjustment": "The chain was loose and dry, which causes the noise and wears the sprockets faster.",
+  "Battery replacement": "The battery failed a load test — it can't hold charge overnight, which is why the bike won't start.",
+  "Headlamp wiring diagnosis": "The headlamp connector is corroded and flickers. Optional: we trace and clean the wiring so it doesn't fail at night.",
+};
+async function ensureDemoReasons() {
+  for (const [title, description] of Object.entries(DEMO_REASONS)) {
+    await prisma.repairTask.updateMany({ where: { title, description: null }, data: { description } });
+  }
+}
+
+/** Department managers at Coimbatore (idempotent, safe to run on an existing demo database). */
+async function ensureDepartmentManagers() {
+  const cbe = await prisma.branch.findUnique({ where: { code: "RE-CBE-01" } });
+  if (!cbe) return;
+  const people: [string, string, string, string, string][] = [
+    ["service.mgr.cbe@oxina.test", "Hari Shankar", "SERVICE_MANAGER", "OXE-1009", "Service Manager"],
+    ["showroom.mgr.cbe@oxina.test", "Kavya Ramesh", "SHOWROOM_MANAGER", "OXE-1010", "Showroom Manager"],
+    ["stores.mgr.cbe@oxina.test", "Murali Dharan", "STORES_MANAGER", "OXE-1011", "Stores Manager"],
+  ];
+  for (const [email, name, role, code, designation] of people) {
+    if (await prisma.user.findUnique({ where: { email } })) continue;
+    const u = await user(email, name, [role], [cbe.id]);
+    await prisma.employee.create({ data: { userId: u.id, employeeCode: code, fullName: name, workEmail: email, designation, branchId: cbe.id, joiningDate: new Date("2024-04-01") } });
+  }
+}
+
 async function main() {
   if (process.env.ALLOW_DEMO_SEED !== "true" || process.env.NODE_ENV === "production") {
     throw new Error("Demo seed refused: set ALLOW_DEMO_SEED=true in a development environment only.");
   }
   if (await prisma.serviceJob.count()) {
-    console.log("Database already contains service data — demo seed skipped.");
+    // Existing demo database: keep the data, just bring roles and the department-manager demo users up to date.
+    await syncRbac(prisma);
+    await ensureDepartmentManagers();
+    await ensureDemoReasons();
+    console.log("Database already contains service data — roles synced, department managers and demo repair explanations filled in; no other data changed.");
     return;
   }
   await syncRbac(prisma);
@@ -319,6 +354,8 @@ async function main() {
     data: { businessUnitId: re.id, branchId: cbe.id, name: "Festive accessory offer", description: "Flat ₹2,000 off on new bookings", appliesTo: "VEHICLE_SALE", discountType: "FLAT", discountValue: 2000, startsAt: new Date(Date.now() - 7 * 86400_000), endsAt: new Date(Date.now() + 30 * 86400_000), createdById: mgrCbe.id, coupons: { create: [{ code: "FESTIVE2000", usageLimit: 50 }] } },
   });
 
+  await ensureDepartmentManagers();
+  await ensureDemoReasons();
   console.log("Demo data ready. Demo password for all *@oxina.test accounts:", DEMO_PASSWORD);
 }
 

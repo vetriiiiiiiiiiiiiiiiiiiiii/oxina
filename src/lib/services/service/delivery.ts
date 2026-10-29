@@ -11,6 +11,7 @@ import { applyStockChange } from "../stock";
 import { getBranchSetting } from "../settings";
 import { activity, afterCommit, getJobForActor, lockJob, setJobStatus, templateValues, timeline } from "./common";
 import { qualityGatePassed } from "./quality";
+import { refreshEtaIfStale } from "./eta";
 
 /** Stage 9. Requires passed QC (when work was done) and a finalized invoice. */
 export async function markReadyForDelivery(actor: Actor, jobId: string, pickupInstructions?: string) {
@@ -169,9 +170,44 @@ export async function submitFeedback(actor: Actor, jobId: string, input: z.infer
  * The customer's view of a job. An explicit allow-list: no internal notes, costs,
  * supplier data, or other employees' private details are ever selected.
  */
+/** Customer wording for a repair's state. Internal pause/block reasons are never shown. */
+function repairStateForCustomer(status: string, holdReason: string | null) {
+  switch (status) {
+    case "PENDING": return { key: "scheduled", label: "Scheduled" };
+    case "READY": return { key: "next", label: "Next in line" };
+    case "IN_PROGRESS": return { key: "working", label: "Being worked on now" };
+    case "PAUSED": return { key: "paused", label: "Paused — will resume shortly" };
+    case "BLOCKED": return holdReason?.startsWith("Awaiting spare part") ? { key: "parts", label: "Waiting for a part" } : { key: "hold", label: "On hold — your advisor will update you" };
+    case "COMPLETED": return { key: "done", label: "Done" };
+    default: return { key: "other", label: status.toLowerCase() };
+  }
+}
+
+function partStateForCustomer(req: { status: string; expectedAvailableAt: Date | null } | undefined) {
+  if (!req) return { key: "checking", label: "Being checked in stores", expected: null };
+  switch (req.status) {
+    case "RESERVED": case "PICKING": case "PICKED": return { key: "reserved", label: "In stock — set aside for your vehicle", expected: null };
+    case "ISSUED": return { key: "issued", label: "Handed to the technician", expected: null };
+    case "UNAVAILABLE": case "AWAITING_PROCUREMENT":
+      if (!req.expectedAvailableAt) return { key: "ordering", label: "Out of stock — being ordered, date to be confirmed", expected: null };
+      if (req.expectedAvailableAt.getTime() < Date.now()) return { key: "late", label: "Delayed — later than expected, being chased", expected: req.expectedAvailableAt };
+      return { key: "ordered", label: "On order", expected: req.expectedAvailableAt };
+    default: return { key: "other", label: "—", expected: null };
+  }
+}
+
+const firstName = (n: string | null | undefined) => (n ? n.split(" ")[0] : null);
+
+/**
+ * The customer's view of a job. An explicit allow-list: no internal notes, internal hold reasons,
+ * purchase costs, supplier data, or other employees' private details are ever selected.
+ * Organised around three questions: what is being changed, what is needed, how long it takes.
+ */
 export async function customerJobView(actor: Actor, jobId: string) {
+  await getJobForActor(actor, jobId); // authorise before touching anything
+  await refreshEtaIfStale(jobId);
   const job = await getJobForActor(actor, jobId);
-  const [events, estimates, invoice, photos, feedback, tasks, shortages] = await Promise.all([
+  const [events, estimates, invoice, photos, feedback, tasks, requests, inspection, qcList] = await Promise.all([
     prisma.serviceTimelineEvent.findMany({ where: { jobId }, orderBy: { occurredAt: "asc" } }),
     prisma.repairEstimate.findMany({
       where: { jobId, status: { not: "DRAFT" } },
@@ -184,10 +220,82 @@ export async function customerJobView(actor: Actor, jobId: string) {
     prisma.invoice.findFirst({ where: { serviceJobId: jobId, status: { notIn: ["DRAFT", "CANCELLED"] } }, select: { id: true, invoiceNumber: true, status: true, grandTotal: true, amountPaid: true, balanceDue: true } }),
     prisma.servicePhoto.findMany({ where: { jobId, customerVisible: true }, select: { id: true, fileId: true, stage: true, caption: true } }),
     prisma.customerFeedback.findUnique({ where: { serviceJobId: jobId }, select: { rating: true, comments: true } }),
-    prisma.repairTask.findMany({ where: { jobId, status: { not: "CANCELLED" }, approved: true }, select: { id: true, title: true, status: true }, orderBy: { sequence: "asc" } }),
-    prisma.sparePartRequest.count({ where: { jobId, status: { in: ["UNAVAILABLE", "AWAITING_PROCUREMENT"] } } }),
+    prisma.repairTask.findMany({
+      where: { jobId },
+      orderBy: { sequence: "asc" },
+      select: {
+        id: true, title: true, description: true, status: true, origin: true, requiresApproval: true, approved: true, isOptional: true, isSafetyCritical: true,
+        estimatedMinMinutes: true, estimatedMaxMinutes: true, workedMinutes: true, lastResumedAt: true, startedAt: true, completedAt: true, holdReason: true, reworkCount: true,
+        assignedMechanic: { select: { name: true } },
+      },
+    }),
+    prisma.sparePartRequest.findMany({ where: { jobId, status: { not: "CANCELLED" } }, select: { estimateLineId: true, status: true, expectedAvailableAt: true } }),
+    prisma.serviceInspection.findFirst({ where: { jobId, completedAt: { not: null } }, orderBy: { completedAt: "desc" }, select: { checklist: true, customerSummary: true, completedAt: true, safetyCritical: true, examiner: { select: { name: true } } } }),
+    prisma.qualityInspection.findMany({ where: { jobId, completedAt: { not: null } }, orderBy: { completedAt: "asc" }, select: { result: true, completedAt: true, testRides: { select: { result: true, endedAt: true } } } }),
   ]);
-  const breakdown = (job.etaBreakdown ?? {}) as { reason?: string };
+  const now = Date.now();
+  const tz = job.branch.timezone;
+  const breakdown = (job.etaBreakdown ?? {}) as { reason?: string; activeMinutes?: { min: number; max: number }; queueMinutes?: { min: number; max: number }; partsWaitMinutes?: number };
+  const reqByLine = new Map(requests.filter((r) => r.estimateLineId).map((r) => [r.estimateLineId!, r]));
+  const allLines = estimates.flatMap((e) => e.lines.map((l) => ({ ...l, estimateStatus: e.status, decidedAt: e.decidedAt })));
+
+  // What is being changed: every repair the customer agreed to (or that needs no approval).
+  const repairs = tasks
+    .filter((t) => t.status !== "CANCELLED" && (t.approved || !t.requiresApproval))
+    .map((t) => {
+      const lines = allLines.filter((l) => l.repairTaskId === t.id && l.approvalStatus === "APPROVED");
+      const running = t.status === "IN_PROGRESS" && t.lastResumedAt ? Math.round((now - t.lastResumedAt.getTime()) / 60_000) : 0;
+      return {
+        id: t.id,
+        title: t.title,
+        why: t.description,
+        safety: t.isSafetyCritical,
+        addedLater: t.origin === "SUPPLEMENTARY",
+        redoneAfterCheck: t.reworkCount > 0,
+        state: repairStateForCustomer(t.status, t.holdReason),
+        technician: firstName(t.assignedMechanic?.name),
+        time: { estimateMin: t.estimatedMinMinutes, estimateMax: t.estimatedMaxMinutes, spent: t.workedMinutes + running, startedAt: t.startedAt, finishedAt: t.completedAt },
+        parts: lines.filter((l) => l.type === "PART").map((l) => ({ name: l.description.replace(/\s*\([^)]*\)\s*$/, ""), quantity: l.quantity, ...partStateForCustomer(reqByLine.get(l.id)) })),
+        price: lines.reduce((a, l) => a + Number(l.lineTotal), 0),
+      };
+    });
+  const declined = tasks.filter((t) => t.status === "CANCELLED" && t.requiresApproval && !t.approved).map((t) => ({ id: t.id, title: t.title }));
+  // Repairs proposed but not yet decided: explanation and time, shown next to the approval buttons.
+  const proposed = Object.fromEntries(
+    tasks.filter((t) => t.status !== "CANCELLED" && t.requiresApproval && !t.approved).map((t) => [t.id, { why: t.description, safety: t.isSafetyCritical, min: t.estimatedMinMinutes, max: t.estimatedMaxMinutes }]),
+  );
+
+  // What is needed from the customer.
+  const pendingEstimate = estimates.find((e) => e.status === "SENT");
+  const closed = ["DELIVERED", "CLOSED", "CANCELLED"].includes(job.status);
+  const needsYou: { key: string; title: string; detail: string }[] = [];
+  if (pendingEstimate) needsYou.push({ key: "approve", title: pendingEstimate.kind === "SUPPLEMENTARY" ? "Approve or decline the additional work" : "Approve or decline the estimate", detail: "Chargeable work starts only after you decide. Choose for each repair below." });
+  if (!job.customerAcknowledgedAt && !closed) needsYou.push({ key: "acknowledge", title: "Confirm the job card", detail: "Check the vehicle details, odometer and the problems we noted at reception." });
+  if (job.status === "READY_FOR_DELIVERY") needsYou.push({ key: "collect", title: "Collect your vehicle", detail: invoice && Number(invoice.balanceDue) > 0 ? `Balance of ₹${Number(invoice.balanceDue).toFixed(2)} is payable at pickup.` : `Your vehicle is ready at ${job.branch.name}.` });
+  if (closed && job.status !== "CANCELLED" && !feedback) needsYou.push({ key: "feedback", title: "Tell us how we did", detail: "Takes ten seconds and goes straight to the branch." });
+
+  // What the workshop is waiting for.
+  const waitingOn: { title: string; detail: string; expected: Date | null; late: boolean }[] = [];
+  for (const r of repairs) for (const p of r.parts) if (p.key === "ordering" || p.key === "ordered" || p.key === "late") waitingOn.push({ title: `${p.name} for “${r.title}”`, detail: p.label, expected: p.expected, late: p.key === "late" });
+
+  // How long it takes: progress, time left, and every change to the promised time with the reason.
+  const done = repairs.filter((r) => r.state.key === "done").length;
+  const etaChanges: { at: Date; from: Date | null; to: Date | null; why: string }[] = [];
+  let lastEta: Date | null = null;
+  let seen = false;
+  for (const e of events) {
+    const eta = e.etaLatest;
+    if (!seen) { lastEta = eta; seen = true; continue; }
+    const moved = (eta?.getTime() ?? null) !== (lastEta?.getTime() ?? null) && (!eta || !lastEta || Math.abs(eta.getTime() - lastEta.getTime()) > 30 * 60_000);
+    if (moved) etaChanges.push({ at: e.occurredAt, from: lastEta, to: eta, why: e.title });
+    lastEta = eta;
+  }
+  const afterRepairs = [
+    { label: "Quality check", done: qcList.some((q) => q.result === "PASSED") },
+    { label: "Test ride", done: qcList.some((q) => q.testRides.some((t) => t.result === "OK" && t.endedAt)) },
+    { label: "Final bill", done: !!invoice },
+  ];
+
   return {
     id: job.id,
     jobNumber: job.jobNumber,
@@ -195,10 +303,12 @@ export async function customerJobView(actor: Actor, jobId: string) {
     serviceType: job.serviceType,
     receivedAt: job.receivedAt,
     acknowledgedAt: job.customerAcknowledgedAt,
-    vehicle: { modelName: job.customerVehicle.modelName, registrationNumber: job.customerVehicle.registrationNumber },
-    branch: { name: job.branch.name, phone: job.branch.phone, address: [job.branch.addressLine, job.branch.city].filter(Boolean).join(", "), timezone: job.branch.timezone },
+    vehicle: { modelName: job.customerVehicle.modelName, registrationNumber: job.customerVehicle.registrationNumber, odometerIn: job.odometerIn, fuelLevel: job.fuelLevel },
+    branch: { name: job.branch.name, phone: job.branch.phone, address: [job.branch.addressLine, job.branch.city].filter(Boolean).join(", "), timezone: tz },
     advisor: { name: job.serviceAdvisor.name, phone: job.branch.phone },
     reportedProblems: job.reportedProblems,
+    existingDamage: job.existingDamage,
+    accessoriesReceived: job.accessoriesReceived,
     eta: {
       earliest: job.etaEarliest,
       latest: job.etaLatest,
@@ -207,11 +317,38 @@ export async function customerJobView(actor: Actor, jobId: string) {
       reason: breakdown.reason ?? null,
       initialEstimate: job.expectedCompletionAt,
     },
-    partsDelayed: shortages > 0,
+    time: {
+      repairsDone: done,
+      repairsTotal: repairs.length,
+      workLeft: breakdown.activeMinutes ?? null,
+      partsWait: breakdown.partsWaitMinutes ?? 0,
+      queue: breakdown.queueMinutes ?? null,
+      afterRepairs,
+      changes: etaChanges,
+    },
+    partsDelayed: waitingOn.length > 0,
+    needsYou,
+    waitingOn,
+    found: inspection
+      ? {
+          summary: inspection.customerSummary,
+          safety: inspection.safetyCritical,
+          at: inspection.completedAt,
+          by: firstName(inspection.examiner.name),
+          checks: ((inspection.checklist ?? []) as { label: string; result: string }[]).map((c) => ({ label: c.label, result: c.result })),
+        }
+      : null,
+    repairs,
+    declined,
+    proposed,
+    costs: {
+      approved: estimates.reduce((a, e) => a + Number(e.approvedTotal), 0),
+      awaitingDecision: pendingEstimate ? Number(pendingEstimate.grandTotal) : 0,
+    },
     stages: buildStageView(events, job.status),
-    events: events.map((e) => ({ id: e.id, stage: e.stage, state: e.state, title: e.title, note: e.customerNote, actorName: e.actorName, actorRole: e.actorRole, next: e.nextExpectedAction, at: e.occurredAt })),
+    events: events.map((e) => ({ id: e.id, stage: e.stage, state: e.state, title: e.title, note: e.customerNote, actorName: firstName(e.actorName), actorRole: e.actorRole, next: e.nextExpectedAction, at: e.occurredAt })),
     estimates,
-    tasks,
+    tasks: repairs.map((r) => ({ id: r.id, title: r.title, status: r.state.key })),
     invoice,
     photos,
     feedback,
@@ -222,6 +359,8 @@ export type CustomerJobView = Awaited<ReturnType<typeof customerJobView>>;
 
 /** Staff workspace data for a job (everything, including internal records). */
 export async function staffJobDetail(actor: Actor, jobId: string) {
+  await getJobForActor(actor, jobId);
+  await refreshEtaIfStale(jobId);
   const job = await getJobForActor(actor, jobId);
   if (actor.kind !== "STAFF") throw forbidden();
   const [full, events, activityLog, availability] = await Promise.all([

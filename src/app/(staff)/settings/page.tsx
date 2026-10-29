@@ -20,13 +20,24 @@ export const metadata = { title: "Settings" };
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
   const actor = await requireStaffPage();
-  if (!can(actor, "users.view") && !can(actor, "settings.manage") && !can(actor, "notifications.templates.manage")) throw forbidden();
-  const tab = (await searchParams).tab ?? (can(actor, "users.view") ? "users" : "policies");
+  const show = {
+    users: can(actor, "users.manage"),
+    roles: can(actor, "users.manage") && actor.allBranches,
+    policies: can(actor, "settings.manage"),
+    durations: can(actor, "settings.durations"),
+    templates: can(actor, "notifications.templates.manage"),
+  };
+  if (!Object.values(show).some(Boolean)) throw forbidden();
+  const requested = (await searchParams).tab;
   const tabs = [
-    ...(can(actor, "users.view") ? [{ key: "users", label: "Users & access", href: "?tab=users" }, { key: "roles", label: "Role permissions", href: "?tab=roles" }] : []),
-    ...(can(actor, "settings.manage") ? [{ key: "policies", label: "Branch policies", href: "?tab=policies" }, { key: "durations", label: "Repair durations", href: "?tab=durations" }] : []),
-    ...(can(actor, "notifications.templates.manage") ? [{ key: "templates", label: "Notification templates", href: "?tab=templates" }] : []),
+    ...(show.users ? [{ key: "users", label: "Users & access", href: "?tab=users" }] : []),
+    ...(show.roles ? [{ key: "roles", label: "Role permissions", href: "?tab=roles" }] : []),
+    ...(show.policies ? [{ key: "policies", label: "Branch policies", href: "?tab=policies" }] : []),
+    ...(show.durations ? [{ key: "durations", label: "Repair durations", href: "?tab=durations" }] : []),
+    ...(show.templates ? [{ key: "templates", label: "Message templates", href: "?tab=templates" }] : []),
   ];
+  // Never render a tab the person isn't allowed, even if typed into the URL.
+  const tab = tabs.some((t) => t.key === requested) ? requested! : tabs[0].key;
   const branches = await accessibleBranches(actor, true);
   const wb = await workingBranchId(actor, branches.filter((b) => b.isActive));
   return (

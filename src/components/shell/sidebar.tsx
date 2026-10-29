@@ -22,7 +22,10 @@ export function AppShell({ nav, user, branches, selected, unread, allBranches, c
   const [open, setOpen] = React.useState(false);
   React.useEffect(() => setOpen(false), [path]);
 
-  const active = (href: string) => (href === "/service" ? path === "/service" || /^\/service\/(?!board)/.test(path) : path === href || path.startsWith(href + "/"));
+  const hrefs = nav.flatMap((g) => g.items.map((i) => i.href));
+  // The longest menu link that prefixes the current path is the active one (so /service/board doesn't also light up /service).
+  const best = hrefs.filter((h) => path === h || path.startsWith(h + "/")).sort((a, b) => b.length - a.length)[0];
+  const active = (href: string) => href === best;
   const chooseBranch = (id: string) => {
     document.cookie = `oxina_branch=${id}; path=/; samesite=lax; max-age=${60 * 60 * 24 * 90}`;
     router.refresh();
@@ -33,7 +36,7 @@ export function AppShell({ nav, user, branches, selected, unread, allBranches, c
     <nav className="px-3 py-4 text-[14px]" aria-label="Main">
       {nav.map((g) => (
         <div key={g.group} className="mb-4">
-          <p className="mb-1 px-2 text-[12px] text-faint">{g.group}</p>
+          {g.group && <p className="mb-1 px-2 text-[12px] text-faint">{g.group}</p>}
           <ul>
             {g.items.map((it) => (
               <li key={it.href}>

@@ -2,16 +2,45 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { requireCustomerPage } from "@/lib/auth/current";
 import { AppError } from "@/lib/errors";
-import { customerJobView } from "@/lib/services/service/delivery";
+import { customerJobView, type CustomerJobView } from "@/lib/services/service/delivery";
 import { PART_UNAVAILABLE_CUSTOMER_MESSAGE, JOB_STATUS_LABEL } from "@/lib/service/stages";
 import { Card, CardBody, CardHeader, Notice, StatusBadge } from "@/components/ui";
 import { EtaPanel, ServiceTimeline } from "@/components/service/timeline";
 import { LiveRefresh } from "@/components/forms/live-refresh";
 import { ActionButton } from "@/components/forms/action-button";
-import { fmtDateTime, fmtMoney } from "@/lib/utils";
+import { cn, fmtDate, fmtDateTime, fmtMinutes, fmtMoney, fmtTime, titleCase } from "@/lib/utils";
 import { EstimateApproval, FeedbackForm, PhotoLink } from "./client";
 
-export const metadata = { title: "Service tracking" };
+export const metadata = { title: "Your service" };
+
+const CHECK: Record<string, { label: string; cls: string }> = {
+  OK: { label: "OK", cls: "text-ok-700" },
+  ATTENTION: { label: "Needs attention", cls: "text-warn-700" },
+  FAIL: { label: "Problem found", cls: "text-bad-700" },
+  NA: { label: "Not checked", cls: "text-faint" },
+};
+
+const STATE_CLS: Record<string, string> = {
+  done: "text-ok-700",
+  working: "text-navy-900 font-semibold",
+  parts: "text-warn-700",
+  hold: "text-warn-700",
+  paused: "text-warn-700",
+  next: "text-ink",
+  scheduled: "text-muted",
+};
+
+function Section({ n, title, children, id }: { n: number; title: string; children: React.ReactNode; id?: string }) {
+  return (
+    <section id={id} className="scroll-mt-16">
+      <h2 className="mb-2 flex items-baseline gap-2 text-[15px] font-semibold">
+        <span className="font-mono text-[12px] font-normal text-faint">{n}</span>
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
 
 export default async function PortalJob({ params }: { params: Promise<{ id: string }> }) {
   const actor = await requireCustomerPage();
@@ -22,65 +51,240 @@ export default async function PortalJob({ params }: { params: Promise<{ id: stri
   });
   const tz = v.branch.timezone;
   const pending = v.estimates.find((e) => e.status === "SENT");
+  const closed = ["DELIVERED", "CLOSED", "CANCELLED"].includes(v.status);
+  let n = 0;
+
   return (
-    <div className="space-y-5">
-      <Link href="/portal" className="text-xs font-medium text-brand-600">← My vehicles</Link>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">{v.vehicle.modelName}</h1>
-          <p className="text-sm text-muted">{v.vehicle.registrationNumber} · Job {v.jobNumber}</p>
+    <div className="space-y-6">
+      <div>
+        <Link href="/portal" className="text-[13px] text-brand-600 hover:underline">← Your vehicles</Link>
+        <div className="mt-2 flex flex-wrap items-start justify-between gap-2 border-b border-line pb-3">
+          <div>
+            <h1 className="text-[20px] font-semibold leading-tight">{v.vehicle.modelName}</h1>
+            <p className="text-[13px] text-muted"><span className="font-mono">{v.vehicle.registrationNumber}</span> · Job {v.jobNumber} · in since {fmtDateTime(v.receivedAt, tz)}</p>
+          </div>
+          <div className="text-right">
+            <StatusBadge status={v.status} label={JOB_STATUS_LABEL[v.status]} />
+            {!closed && <div><LiveRefresh jobId={v.id} /></div>}
+          </div>
         </div>
-        <div className="flex items-center gap-3"><StatusBadge status={v.status} label={JOB_STATUS_LABEL[v.status]} /><LiveRefresh jobId={v.id} /></div>
       </div>
 
-      <EtaPanel eta={v.eta} tz={tz} status={v.status} partsDelayed={v.partsDelayed} />
-      {v.partsDelayed && <Notice tone="warn">{PART_UNAVAILABLE_CUSTOMER_MESSAGE}</Notice>}
-      {!v.acknowledgedAt && !["DELIVERED", "CLOSED", "CANCELLED"].includes(v.status) && (
-        <Card className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
-          <span>Please confirm the job card details (vehicle, odometer, reported problems) recorded at reception.</span>
-          <ActionButton size="sm" url={`/api/service/jobs/${v.id}/acknowledge`} success="Thank you — job card acknowledged.">Acknowledge job card</ActionButton>
-        </Card>
+      {/* 1. What we need from you */}
+      {v.needsYou.length > 0 && (
+        <Section n={++n} title="What we need from you">
+          <div className="space-y-3">
+            <ul className="border border-line border-l-[3px] border-l-warn-600 bg-white">
+              {v.needsYou.map((x) => (
+                <li key={x.key} className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2.5 last:border-0">
+                  <div>
+                    <p className="text-sm font-medium">{x.title}</p>
+                    <p className="text-[13px] text-muted">{x.detail}</p>
+                  </div>
+                  {x.key === "acknowledge" && <ActionButton size="sm" url={`/api/service/jobs/${v.id}/acknowledge`} success="Thank you — job card confirmed.">Confirm</ActionButton>}
+                </li>
+              ))}
+            </ul>
+            {pending && <EstimateApproval estimate={JSON.parse(JSON.stringify(pending))} proposed={v.proposed} />}
+            {v.needsYou.some((x) => x.key === "feedback") && <FeedbackForm jobId={v.id} />}
+          </div>
+        </Section>
       )}
 
-      {pending && <EstimateApproval estimate={JSON.parse(JSON.stringify(pending))} />}
+      {/* 2. When it will be ready */}
+      <Section n={++n} title="When it will be ready">
+        <div className="space-y-3">
+          <EtaPanel eta={v.eta} tz={tz} status={v.status} partsDelayed={v.partsDelayed} />
+          {!closed && <TimeFacts v={v} />}
+          {v.time.changes.length > 0 && (
+            <Card>
+              <CardHeader title="Changes to the completion time" description="Every time the expected time moved, and what caused it." />
+              <ul className="text-[13px]">
+                {v.time.changes.map((c, i) => (
+                  <li key={i} className="border-b border-line px-4 py-2 last:border-0">
+                    <p><span className="text-muted">{c.from ? fmtDateTime(c.from, tz) : "Not set"}</span> → <b className="font-medium">{c.to ? fmtDateTime(c.to, tz) : "To be confirmed"}</b></p>
+                    <p className="text-muted">{c.why} · {fmtDateTime(c.at, tz)}</p>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+        </div>
+      </Section>
 
-      <Card>
-        <CardHeader title="Service progress" description="Updates appear here as soon as our team records them." />
-        <CardBody><ServiceTimeline stages={v.stages} events={v.events} tz={tz} /></CardBody>
-      </Card>
+      {/* 3. What we found */}
+      <Section n={++n} title="What we found">
+        {v.found ? (
+          <Card>
+            <CardBody className="space-y-3">
+              {v.found.summary && <p className="text-sm">{v.found.summary}</p>}
+              {v.found.safety && <Notice tone="bad">Some findings affect riding safety. Your advisor will explain them.</Notice>}
+              {v.found.checks.length > 0 && (
+                <dl className="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+                  {v.found.checks.map((c, i) => (
+                    <div key={i} className="flex justify-between gap-3 border-b border-line py-1.5 text-[13px]">
+                      <dt>{c.label}</dt>
+                      <dd className={CHECK[c.result]?.cls ?? ""}>{CHECK[c.result]?.label ?? c.result}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              <p className="text-[12px] text-faint">Inspected{v.found.by ? ` by ${v.found.by}` : ""} · {fmtDateTime(v.found.at, tz)}</p>
+            </CardBody>
+          </Card>
+        ) : (
+          <p className="text-[13px] text-muted">A technician will inspect your vehicle. The findings will appear here.</p>
+        )}
+      </Section>
 
-      {v.tasks.length > 0 && (
-        <Card><CardHeader title="Approved work" /><ul className="divide-y divide-line">{v.tasks.map((t) => <li key={t.id} className="flex justify-between px-5 py-3 text-sm"><span>{t.title}</span><StatusBadge status={t.status} label={t.status === "IN_PROGRESS" ? "in progress" : t.status === "COMPLETED" ? "done" : t.status === "BLOCKED" ? "waiting for parts" : "scheduled"} /></li>)}</ul></Card>
-      )}
+      {/* 4. What we are changing */}
+      <Section n={++n} title="What we're doing to your vehicle">
+        {v.repairs.length ? (
+          <div className="space-y-2.5">
+            {v.repairs.map((r) => <RepairCard key={r.id} r={r} tz={tz} />)}
+            {v.declined.length > 0 && <p className="text-[13px] text-muted">You chose not to go ahead with: {v.declined.map((d) => d.title).join(", ")}.</p>}
+            {v.partsDelayed && <Notice tone="warn">{PART_UNAVAILABLE_CUSTOMER_MESSAGE}</Notice>}
+          </div>
+        ) : (
+          <p className="text-[13px] text-muted">{pending ? "Repairs will be listed here once you approve the estimate." : "Repairs will be listed here after the inspection."}</p>
+        )}
+      </Section>
 
-      {v.estimates.filter((e) => e.status !== "SENT").map((e) => (
-        <Card key={e.id}>
-          <CardHeader title={`${e.kind === "SUPPLEMENTARY" ? "Additional work" : "Estimate"} ${e.estimateNumber}`} action={<StatusBadge status={e.status} />} />
-          <ul className="divide-y divide-line text-sm">{e.lines.map((l) => <li key={l.id} className="flex justify-between gap-3 px-5 py-2.5"><span>{l.description}</span><span className="whitespace-nowrap tabular-nums">{fmtMoney(l.lineTotal)} <StatusBadge status={l.approvalStatus} /></span></li>)}</ul>
-          <CardBody className="text-right text-sm">Approved total <b>{fmtMoney(e.approvedTotal)}</b></CardBody>
-        </Card>
-      ))}
-
-      {v.invoice && (
+      {/* 5. Cost */}
+      <Section n={++n} title="Cost">
         <Card>
-          <CardHeader title="Final invoice" action={<Link className="text-xs font-medium text-brand-600" href={`/portal/invoices/${v.invoice.id}`}>View →</Link>} />
-          <CardBody className="flex flex-wrap gap-x-6 gap-y-2 text-sm"><span>{v.invoice.invoiceNumber}</span><span>Total <b>{fmtMoney(v.invoice.grandTotal)}</b></span><span>Paid {fmtMoney(v.invoice.amountPaid)}</span><span className={Number(v.invoice.balanceDue) > 0 ? "font-medium text-warn-700" : "text-ok-700"}>Balance {fmtMoney(v.invoice.balanceDue)}</span></CardBody>
+          <dl className="text-sm">
+            <div className="flex justify-between border-b border-line px-4 py-2"><dt className="text-muted">Work you’ve approved (incl. tax)</dt><dd className="font-mono">{fmtMoney(v.costs.approved)}</dd></div>
+            {v.costs.awaitingDecision > 0 && <div className="flex justify-between border-b border-line px-4 py-2"><dt className="text-muted">Waiting for your decision</dt><dd className="font-mono text-warn-700">{fmtMoney(v.costs.awaitingDecision)}</dd></div>}
+            {v.invoice ? (
+              <>
+                <div className="flex justify-between border-b border-line px-4 py-2"><dt>Final invoice <Link href={`/portal/invoices/${v.invoice.id}`} className="font-mono text-[13px] text-brand-600 hover:underline">{v.invoice.invoiceNumber}</Link></dt><dd className="font-mono font-medium">{fmtMoney(v.invoice.grandTotal)}</dd></div>
+                <div className="flex justify-between border-b border-line px-4 py-2"><dt className="text-muted">Paid</dt><dd className="font-mono">{fmtMoney(v.invoice.amountPaid)}</dd></div>
+                <div className="flex justify-between px-4 py-2"><dt>Balance</dt><dd className={cn("font-mono", Number(v.invoice.balanceDue) > 0 ? "text-warn-700" : "text-ok-700")}>{fmtMoney(v.invoice.balanceDue)}</dd></div>
+              </>
+            ) : (
+              <p className="px-4 py-2 text-[13px] text-muted">The final invoice is made after the quality check, from the work actually done and the parts actually fitted. It will not exceed what you approved unless you approve more.</p>
+            )}
+          </dl>
         </Card>
+      </Section>
+
+      {/* 6. Full log */}
+      <Section n={++n} title="Everything that has happened">
+        <Card><CardBody><ServiceTimeline stages={v.stages} events={v.events} tz={tz} /></CardBody></Card>
+      </Section>
+
+      {/* 7. Reception record */}
+      <Section n={++n} title="What we recorded when you dropped it off">
+        <Card>
+          <CardBody className="grid gap-3 text-[13px] sm:grid-cols-2">
+            <div><p className="text-muted">Problems you told us about</p><p>{v.reportedProblems}</p></div>
+            <div><p className="text-muted">Odometer · fuel</p><p className="font-mono">{v.vehicle.odometerIn.toLocaleString("en-IN")} km · {titleCase(v.vehicle.fuelLevel)}</p></div>
+            <div><p className="text-muted">Existing marks or damage</p><p>{v.existingDamage || "None noted"}</p></div>
+            <div><p className="text-muted">Items left with the vehicle</p><p>{v.accessoriesReceived.length ? v.accessoriesReceived.join(", ") : "None"}</p></div>
+            <p className="text-faint sm:col-span-2">{v.acknowledgedAt ? `You confirmed these details on ${fmtDateTime(v.acknowledgedAt, tz)}.` : "Not confirmed yet."}</p>
+          </CardBody>
+        </Card>
+      </Section>
+
+      {v.photos.length > 0 && (
+        <Section n={++n} title="Photos">
+          <div className="flex flex-wrap gap-2">{v.photos.map((p) => <PhotoLink key={p.id} fileId={p.fileId} label={p.caption ?? p.stage.toLowerCase()} />)}</div>
+        </Section>
       )}
 
-      {v.photos.length > 0 && <Card><CardHeader title="Photos shared with you" /><CardBody className="flex flex-wrap gap-2">{v.photos.map((p) => <PhotoLink key={p.id} fileId={p.fileId} label={p.caption ?? p.stage.toLowerCase()} />)}</CardBody></Card>}
-
-      {["DELIVERED", "CLOSED"].includes(v.status) && (v.feedback ? <Notice tone="ok" title={`Thanks for your feedback (${v.feedback.rating}/5)`}>{v.feedback.comments ?? ""}</Notice> : <FeedbackForm jobId={v.id} />)}
+      {v.feedback && <Notice tone="ok" title={`Your rating: ${v.feedback.rating}/5`}>{v.feedback.comments ?? "Thank you."}</Notice>}
 
       <Card>
-        <CardHeader title="Your service centre" />
-        <CardBody className="space-y-1.5 text-sm">
+        <CardBody className="text-[13px]">
           <p className="font-medium">{v.branch.name}</p>
-          {v.branch.address && <p className="flex items-center gap-1.5 text-muted">{v.branch.address}</p>}
-          <p className="flex items-center gap-1.5 text-muted">Service advisor {v.advisor.name}{v.advisor.phone ? ` · ${v.advisor.phone}` : ""}</p>
-          <p className="text-xs text-faint">Received {fmtDateTime(v.receivedAt, tz)}</p>
+          {v.branch.address && <p className="text-muted">{v.branch.address}</p>}
+          <p className="text-muted">Service advisor {v.advisor.name}{v.advisor.phone ? ` · ${v.advisor.phone}` : ""}</p>
         </CardBody>
       </Card>
     </div>
+  );
+}
+
+function TimeFacts({ v }: { v: CustomerJobView }) {
+  const t = v.time;
+  const pct = t.repairsTotal ? Math.round((t.repairsDone / t.repairsTotal) * 100) : 0;
+  return (
+    <Card>
+      <CardBody className="space-y-3 text-[13px]">
+        {t.repairsTotal > 0 && (
+          <div>
+            <div className="mb-1 flex justify-between"><span>Repairs finished</span><span className="font-mono">{t.repairsDone} of {t.repairsTotal}</span></div>
+            <div className="h-1.5 bg-line"><div className="h-1.5 bg-ok-600" style={{ width: `${pct}%` }} /></div>
+          </div>
+        )}
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
+          {t.workLeft && <div className="flex justify-between gap-3"><dt className="text-muted">Hands-on work left, incl. checks</dt><dd className="font-mono">{t.workLeft.min === t.workLeft.max ? fmtMinutes(t.workLeft.min) : `${fmtMinutes(t.workLeft.min)}–${fmtMinutes(t.workLeft.max)}`}</dd></div>}
+
+          {t.queue && t.queue.max > 0 && <div className="flex justify-between gap-3"><dt className="text-muted">Technician finishing other work first</dt><dd className="font-mono">up to {fmtMinutes(t.queue.max)}</dd></div>}
+        </dl>
+        <div>
+          <p className="mb-1 text-muted">After the repairs</p>
+          <ul className="flex flex-wrap gap-x-4 gap-y-1">
+            {t.afterRepairs.map((s) => <li key={s.label} className={s.done ? "text-ok-700" : "text-muted"}>{s.done ? "✓" : "○"} {s.label}</li>)}
+          </ul>
+        </div>
+        {v.waitingOn.length > 0 && (
+          <div>
+            <p className="mb-1 text-muted">We’re waiting for</p>
+            <ul>{v.waitingOn.map((w, i) => <li key={i}>{w.title}<br /><span className={w.late ? "text-bad-700" : "text-warn-700"}>{w.detail}{w.expected ? ` (expected ${fmtDateTime(w.expected, v.branch.timezone)})` : ""}</span></li>)}</ul>
+          </div>
+        )}
+        <p className="text-[12px] text-faint">Times are for workshop hours only and are recalculated whenever something changes.</p>
+      </CardBody>
+    </Card>
+  );
+}
+
+function RepairCard({ r, tz }: { r: CustomerJobView["repairs"][number]; tz: string }) {
+  const est = r.time.estimateMin === r.time.estimateMax ? fmtMinutes(r.time.estimateMin) : `${fmtMinutes(r.time.estimateMin)}–${fmtMinutes(r.time.estimateMax)}`;
+  return (
+    <Card className={cn(r.state.key === "working" && "border-l-[3px] border-l-navy-900")}>
+      <div className="px-4 py-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-sm font-semibold">{r.title}</p>
+          <p className={cn("text-[13px]", STATE_CLS[r.state.key] ?? "")}>{r.state.label}</p>
+        </div>
+        {(r.safety || r.addedLater || r.redoneAfterCheck) && (
+          <p className="mt-0.5 text-[12px] text-muted">
+            {[r.safety && "Affects riding safety", r.addedLater && "Found during the service — added with your approval", r.redoneAfterCheck && "Re-checked and corrected after the quality check"].filter(Boolean).join(" · ")}
+          </p>
+        )}
+        {r.why && <p className="mt-1 text-[13px]">{r.why}</p>}
+
+        <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 text-[13px] sm:grid-cols-2">
+          <div className="flex justify-between gap-3"><dt className="text-muted">Usually takes</dt><dd className="font-mono">{est}</dd></div>
+          {r.technician && <div className="flex justify-between gap-3"><dt className="text-muted">Technician</dt><dd>{r.technician}</dd></div>}
+          {r.time.startedAt && <div className="flex justify-between gap-3"><dt className="text-muted">Started</dt><dd className="font-mono">{fmtDate(r.time.startedAt, tz) === fmtDate(new Date(), tz) ? fmtTime(r.time.startedAt, tz) : fmtDateTime(r.time.startedAt, tz)}</dd></div>}
+          {r.time.finishedAt ? (
+            <div className="flex justify-between gap-3"><dt className="text-muted">Finished</dt><dd className="font-mono">{fmtDateTime(r.time.finishedAt, tz)} <span className="text-muted">({fmtMinutes(r.time.spent)})</span></dd></div>
+          ) : r.time.spent > 0 ? (
+            <div className="flex justify-between gap-3"><dt className="text-muted">Time spent so far</dt><dd className="font-mono">{fmtMinutes(r.time.spent)}</dd></div>
+          ) : null}
+        </dl>
+
+        {r.parts.length > 0 && (
+          <div className="mt-2">
+            <p className="text-[12px] text-muted">Parts being fitted</p>
+            <ul className="mt-0.5 text-[13px]">
+              {r.parts.map((p, i) => (
+                <li key={i} className="flex flex-wrap justify-between gap-x-3 border-b border-line py-1 last:border-0">
+                  <span>{p.name} <span className="text-muted">× {p.quantity}</span></span>
+                  <span className={p.key === "late" ? "text-bad-700" : p.key === "ordering" || p.key === "ordered" ? "text-warn-700" : p.key === "issued" ? "text-ok-700" : "text-muted"}>
+                    {p.label}{p.expected ? ` — ${p.key === "late" ? "was due" : "expected"} ${fmtDateTime(p.expected, tz)}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {r.price > 0 && <p className="mt-2 text-right text-[13px]"><span className="text-muted">Approved price </span><span className="font-mono">{fmtMoney(r.price)}</span></p>}
+      </div>
+    </Card>
   );
 }

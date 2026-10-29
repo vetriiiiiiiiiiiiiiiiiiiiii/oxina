@@ -61,73 +61,78 @@ Pure functions, unit-tested. Remaining work is list-scheduled twice (min and max
 
 Source of truth: `src/lib/rbac/permissions.ts` (synced into the DB by the seed/bootstrap). Generated table:
 
-| Permission | SA | OWN | BM | SALES | WH | ADV | BILL | MECH | QC | OEM | CUST |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| `org.view` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `org.manage` | ● |  |  |  |  |  |  |  |  |  |  |
-| `dashboard.group` | ● | ● |  |  |  |  |  |  |  |  |  |
-| `dashboard.branch` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `users.view` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `users.manage` | ● |  |  |  |  |  |  |  |  |  |  |
-| `settings.manage` | ● |  |  |  |  |  |  |  |  |  |  |
-| `audit.view` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `showroom.view` | ● | ● | ● | ● |  |  |  |  |  |  |  |
-| `showroom.leads.manage` | ● |  | ● | ● |  |  |  |  |  |  |  |
-| `showroom.quotations.manage` | ● |  | ● | ● |  |  |  |  |  |  |  |
-| `showroom.bookings.manage` | ● |  | ● | ● |  |  |  |  |  |  |  |
-| `showroom.pricing.approve` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `vehicles.view` | ● | ● | ● | ● |  |  |  |  |  |  |  |
-| `vehicles.manage` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `vehicles.cost.view` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `offers.view` | ● | ● | ● | ● |  |  |  |  |  |  |  |
-| `offers.manage` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `inventory.view` | ● | ● | ● |  | ● | ● | ● |  |  |  |  |
-| `inventory.manage` | ● |  | ● |  | ● |  |  |  |  |  |  |
-| `inventory.issue` | ● |  | ● |  | ● |  |  |  |  |  |  |
-| `inventory.transfer` | ● |  | ● |  | ● |  |  |  |  |  |  |
-| `inventory.cost.view` | ● | ● | ● |  | ● |  |  |  |  |  |  |
-| `purchases.manage` | ● |  | ● |  | ● |  |  |  |  |  |  |
-| `purchases.approve` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `suppliers.manage` | ● |  | ● |  | ● |  |  |  |  |  |  |
-| `service.view` | ● | ● | ● |  | ● | ● | ● |  | ● |  |  |
-| `service.view.assigned` |  |  |  |  |  |  |  | ● |  |  |  |
-| `service.job.create` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `service.job.manage` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `service.inspect` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `service.estimate.manage` | ● |  | ● |  |  | ● | ● |  |  |  |  |
-| `service.estimate.record_approval` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `service.discount.approve` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `service.parts.request` | ● |  | ● |  |  | ● | ● | ● |  |  |  |
-| `service.repair.assign` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `service.repair.work` | ● |  |  |  |  |  |  | ● |  |  |  |
-| `service.quality.inspect` | ● |  | ● |  |  |  |  |  | ● |  |  |
-| `service.handover` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `followups.manage` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `customers.view` | ● | ● | ● | ● |  | ● | ● |  |  |  |  |
-| `customers.manage` | ● |  | ● | ● |  | ● |  |  |  |  |  |
-| `customers.sensitive.view` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `employees.view` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `employees.manage` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `attendance.self` | ● |  | ● | ● | ● | ● | ● | ● | ● |  |  |
-| `attendance.manage` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `targets.view` | ● | ● | ● | ● | ● | ● | ● | ● | ● |  |  |
-| `targets.manage` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `billing.view` | ● | ● | ● |  |  |  | ● |  |  |  |  |
-| `billing.manage` | ● |  | ● |  |  |  | ● |  |  |  |  |
-| `billing.credit_note` | ● |  | ● |  |  |  |  |  |  |  |  |
-| `payments.record` | ● |  | ● | ● |  |  | ● |  |  |  |  |
-| `payments.confirm` | ● |  | ● |  |  |  | ● |  |  |  |  |
-| `refunds.approve` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `expenses.submit` | ● |  | ● | ● | ● |  |  |  |  |  |  |
-| `expenses.approve` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `warranty.view` | ● | ● | ● |  |  | ● |  |  |  | ● |  |
-| `warranty.manage` | ● |  | ● |  |  | ● |  |  |  |  |  |
-| `reports.view` | ● | ● | ● |  |  |  |  |  |  | ● |  |
-| `reports.export` | ● | ● | ● |  |  |  |  |  |  |  |  |
-| `notifications.templates.manage` | ● |  |  |  |  |  |  |  |  |  |  |
-| `portal.access` |  |  |  |  |  |  |  |  |  |  | ● |
+| Permission | SA | OWN | BM | SVM | SRM | STM | SALES | WH | ADV | BILL | MECH | QC | OEM | CUST |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `org.view` | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  |  |  |
+| `org.manage` | ● |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| `dashboard.group` | ● | ● |  |  |  |  |  |  |  |  |  |  |  |  |
+| `dashboard.branch` | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  |  |  |
+| `users.view` | ● | ● | ● |  |  |  |  |  |  |  |  |  |  |  |
+| `users.manage` | ● |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| `settings.manage` | ● |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| `settings.durations` | ● |  | ● | ● |  |  |  |  |  |  |  |  |  |  |
+| `audit.view` | ● | ● | ● |  |  |  |  |  |  |  |  |  |  |  |
+| `showroom.view` | ● | ● | ● |  | ● |  | ● |  |  |  |  |  |  |  |
+| `showroom.leads.manage` | ● |  | ● |  | ● |  | ● |  |  |  |  |  |  |  |
+| `showroom.quotations.manage` | ● |  | ● |  | ● |  | ● |  |  |  |  |  |  |  |
+| `showroom.bookings.manage` | ● |  | ● |  | ● |  | ● |  |  |  |  |  |  |  |
+| `showroom.pricing.approve` | ● |  | ● |  | ● |  |  |  |  |  |  |  |  |  |
+| `vehicles.view` | ● | ● | ● |  | ● |  | ● |  |  |  |  |  |  |  |
+| `vehicles.manage` | ● |  | ● |  | ● |  |  |  |  |  |  |  |  |  |
+| `vehicles.cost.view` | ● | ● | ● |  | ● |  |  |  |  |  |  |  |  |  |
+| `offers.view` | ● | ● | ● |  | ● |  | ● |  |  |  |  |  |  |  |
+| `offers.manage` | ● |  | ● |  | ● |  |  |  |  |  |  |  |  |  |
+| `inventory.view` | ● | ● | ● | ● |  | ● |  | ● | ● | ● |  |  |  |  |
+| `inventory.manage` | ● |  | ● |  |  | ● |  | ● |  |  |  |  |  |  |
+| `inventory.issue` | ● |  | ● |  |  | ● |  | ● |  |  |  |  |  |  |
+| `inventory.transfer` | ● |  | ● |  |  | ● |  | ● |  |  |  |  |  |  |
+| `inventory.cost.view` | ● | ● | ● |  |  | ● |  | ● |  |  |  |  |  |  |
+| `purchases.manage` | ● |  | ● |  |  | ● |  | ● |  |  |  |  |  |  |
+| `purchases.approve` | ● | ● | ● |  |  | ● |  |  |  |  |  |  |  |  |
+| `suppliers.manage` | ● |  | ● |  |  | ● |  | ● |  |  |  |  |  |  |
+| `service.view` | ● | ● | ● | ● |  | ● |  | ● | ● | ● |  | ● |  |  |
+| `service.view.assigned` |  |  |  |  |  |  |  |  |  |  | ● |  |  |  |
+| `service.job.create` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `service.job.manage` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `service.inspect` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `service.estimate.manage` | ● |  | ● | ● |  |  |  |  | ● | ● |  |  |  |  |
+| `service.estimate.record_approval` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `service.discount.approve` | ● |  | ● | ● |  |  |  |  |  |  |  |  |  |  |
+| `service.parts.request` | ● |  | ● | ● |  |  |  |  | ● | ● | ● |  |  |  |
+| `service.repair.assign` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `service.repair.work` | ● |  |  |  |  |  |  |  |  |  | ● |  |  |  |
+| `service.quality.inspect` | ● |  | ● | ● |  |  |  |  |  |  |  | ● |  |  |
+| `service.handover` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `followups.manage` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `customers.view` | ● | ● | ● | ● | ● |  | ● |  | ● | ● |  |  |  |  |
+| `customers.manage` | ● |  | ● | ● | ● |  | ● |  | ● |  |  |  |  |  |
+| `customers.sensitive.view` | ● |  | ● |  | ● |  |  |  |  |  |  |  |  |  |
+| `employees.view` | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  |  |  |
+| `employees.manage` | ● |  | ● |  |  |  |  |  |  |  |  |  |  |  |
+| `attendance.self` | ● |  | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● |  |  |
+| `attendance.manage` | ● |  | ● | ● | ● | ● |  |  |  |  |  |  |  |  |
+| `targets.view` | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● |  |  |
+| `targets.manage` | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  |  |  |
+| `billing.view` | ● | ● | ● | ● | ● |  |  |  |  | ● |  |  |  |  |
+| `billing.manage` | ● |  | ● |  |  |  |  |  |  | ● |  |  |  |  |
+| `billing.credit_note` | ● |  | ● |  |  |  |  |  |  |  |  |  |  |  |
+| `payments.record` | ● |  | ● |  | ● |  | ● |  |  | ● |  |  |  |  |
+| `payments.confirm` | ● |  | ● |  | ● |  |  |  |  | ● |  |  |  |  |
+| `refunds.approve` | ● | ● | ● |  |  |  |  |  |  |  |  |  |  |  |
+| `expenses.submit` | ● |  | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  |
+| `expenses.approve` | ● | ● | ● |  |  |  |  |  |  |  |  |  |  |  |
+| `warranty.view` | ● | ● | ● | ● |  |  |  |  | ● |  |  |  | ● |  |
+| `warranty.manage` | ● |  | ● | ● |  |  |  |  | ● |  |  |  |  |  |
+| `reports.view` | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  | ● |  |
+| `reports.export` | ● | ● | ● | ● | ● | ● |  |  |  |  |  |  |  |  |
+| `notifications.templates.manage` | ● |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| `portal.access` |  |  |  |  |  |  |  |  |  |  |  |  |  | ● |
 
-Scope: **SA** Super Admin (group) · **OWN** Group Owner (business unit) · **BM** Branch Manager (branch) · **SALES** Showroom Sales Executive (branch) · **WH** Stock / Warehouse Executive (branch) · **ADV** Service Advisor / Examiner (branch) · **BILL** Billing Executive (branch) · **MECH** Mechanic / Technician (branch) · **QC** Quality Inspector / Test Ride (branch) · **OEM** OEM Representative (business unit) · **CUST** Customer (self)
+Scope: **SA** Super Admin (group) · **OWN** Group Owner (business unit) · **BM** Branch Manager (branch) · **SVM** Service Manager (branch) · **SRM** Showroom Manager (branch) · **STM** Stores Manager (branch) · **SALES** Showroom Sales Executive (branch) · **WH** Stock / Warehouse Executive (branch) · **ADV** Service Advisor / Examiner (branch) · **BILL** Billing Executive (branch) · **MECH** Mechanic / Technician (branch) · **QC** Quality Inspector / Test Ride (branch) · **OEM** OEM Representative (business unit) · **CUST** Customer (self)
+
+**Department managers.** Service, Showroom and Stores Managers run one area of a branch. Their menu, home page, reports, invoices and payments are limited to that area, and the server enforces it: dashboard figures outside their area are not returned, reports are tagged by area (`allowedReports`), and invoice lists filter by kind (`invoiceKindsFor`). A Branch Manager runs every area of their branch. Areas are derived in one place, `managerAreas()` in `src/lib/rbac/actor.ts`.
+
+**Menus.** `src/components/shell/nav.ts` builds each person's menu by department. An item appears only for roles that work in that area, not for anyone with read access (an advisor can check stock from a job without "Stock" appearing in their menu). Single-branch managers get "My branch" instead of the group-wide branch list.
 
 Additional rules enforced in code: mechanics see only jobs they are assigned to; sales executives see only their own leads; approvers cannot approve their own purchase orders, refunds, expenses, leave or attendance corrections; non-super-admins can only grant branch roles whose permissions they themselves hold, in their own branches; the last active Super Admin cannot be removed.
 

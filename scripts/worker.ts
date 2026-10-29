@@ -10,6 +10,8 @@
  *     provider delivery confirmation, which plain SMTP does not give.
  *  2. Follow-up reminders — notifies the assigned staff member when a follow-up becomes due.
  *  3. Housekeeping — removes expired sessions, used reset tokens and old rate-limit rows.
+ *  4. Completion times — recalculates the ETA of open jobs every few minutes, because time passing
+ *     (closing hours, a part's expected date going by) changes it even when nobody touches the job.
  */
 import { PrismaClient } from "@prisma/client";
 import nodemailer from "nodemailer";
@@ -64,6 +66,16 @@ async function followUpReminders() {
   }
 }
 
+async function refreshEtas() {
+  const { recalcEta } = await import("../src/lib/services/service/eta");
+  const stale = await prisma.serviceJob.findMany({
+    where: { status: { notIn: ["READY_FOR_DELIVERY", "DELIVERED", "CLOSED", "CANCELLED"] }, OR: [{ etaUpdatedAt: null }, { etaUpdatedAt: { lt: new Date(Date.now() - 10 * 60_000) } }] },
+    select: { id: true },
+    take: 200,
+  });
+  for (const j of stale) await prisma.$transaction((tx) => recalcEta(tx, j.id)).catch((e) => console.error("[worker] eta", j.id, e));
+}
+
 async function housekeeping() {
   const now = new Date();
   await prisma.session.deleteMany({ where: { expiresAt: { lt: now } } });
@@ -80,6 +92,7 @@ async function loop() {
     try {
       const n = await deliverBatch();
       if (tick % 6 === 0) await followUpReminders();
+      if (tick % 30 === 0) await refreshEtas();
       if (tick % 360 === 0) await housekeeping();
       tick++;
       if (n === 0) await new Promise((r) => setTimeout(r, 10_000));

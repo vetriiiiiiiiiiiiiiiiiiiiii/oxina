@@ -1,7 +1,7 @@
 import { requireStaffPage } from "@/lib/auth/current";
 import { can, requirePermission } from "@/lib/rbac/actor";
 import { selectedBranchId } from "@/lib/branch-context";
-import { REPORTS, rangeQuery, runReport, type ReportKey } from "@/lib/services/reports";
+import { REPORTS, allowedReports, rangeQuery, runReport, type ReportKey } from "@/lib/services/reports";
 import { Card, CardHeader, EmptyState, Notice, PageHeader, Table, Td, Th } from "@/components/ui";
 import { RangeFilter } from "@/components/shell/range-filter";
 import { AppError } from "@/lib/errors";
@@ -13,7 +13,9 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
   const actor = await requireStaffPage();
   requirePermission(actor, "reports.view");
   const sp = await searchParams;
-  const key = (sp.report in REPORTS ? sp.report : "revenue") as ReportKey;
+  const allowed = allowedReports(actor);
+  if (!allowed.length) return <PageHeader title="Reports" description="No reports are set up for your role." />;
+  const key = (allowed.includes(sp.report as ReportKey) ? sp.report : allowed[0]) as ReportKey;
   const branchId = await selectedBranchId(actor);
   const q = rangeQuery.parse({ ...sp, branchId });
   let data: Awaited<ReturnType<typeof runReport>> | null = null;
@@ -31,7 +33,7 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
       <PageHeader title="Reports" actions={<RangeFilter />} />
       <div className="grid gap-6 lg:grid-cols-[240px_1fr]">
         <Card className="h-fit p-2">
-          {(Object.entries(REPORTS) as [ReportKey, string][]).map(([k, label]) => {
+          {allowed.map((k) => [k, REPORTS[k]] as const).map(([k, label]) => {
             const p = new URLSearchParams(qs);
             p.set("report", k);
             return <a key={k} href={`/reports?${p}`} className={cn("block rounded-[3px] px-3 py-2 text-sm", k === key ? "bg-navy-900 text-white" : "text-muted hover:bg-canvas hover:text-ink")}>{label}</a>;

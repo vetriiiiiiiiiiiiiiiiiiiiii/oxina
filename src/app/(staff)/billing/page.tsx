@@ -3,7 +3,7 @@ import { requireStaffPage } from "@/lib/auth/current";
 import { can } from "@/lib/rbac/actor";
 import { prisma } from "@/lib/db";
 import { selectedBranchId, workingBranchId } from "@/lib/branch-context";
-import { invoiceQuery, listInvoices } from "@/lib/services/billing";
+import { invoiceQuery, listInvoices, paymentScopeFor } from "@/lib/services/billing";
 import { listExpenses } from "@/lib/services/misc";
 import { accessibleBranches } from "@/lib/services/org";
 import { branchFilter } from "@/lib/rbac/actor";
@@ -67,7 +67,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   }
 
   async function Payments() {
-    const rows = await prisma.payment.findMany({ where: { ...branchFilter(actor, branchId), status: "PENDING_CONFIRMATION" }, orderBy: { createdAt: "asc" }, include: { customer: { select: { fullName: true } }, invoice: { select: { id: true, invoiceNumber: true } }, booking: { select: { id: true, bookingNumber: true } } } });
+    const rows = await prisma.payment.findMany({ where: { ...branchFilter(actor, branchId), ...paymentScopeFor(actor), status: "PENDING_CONFIRMATION" }, orderBy: { createdAt: "asc" }, include: { customer: { select: { fullName: true } }, invoice: { select: { id: true, invoiceNumber: true } }, booking: { select: { id: true, bookingNumber: true } } } });
     return (
       <Card>
         {rows.length ? (
@@ -90,7 +90,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   }
 
   async function Refunds() {
-    const rows = await prisma.refund.findMany({ where: { payment: branchFilter(actor, branchId) }, orderBy: { createdAt: "desc" }, take: 100, include: { payment: { select: { receiptNumber: true, amount: true, customer: { select: { fullName: true } } } } } });
+    const rows = await prisma.refund.findMany({ where: { payment: { ...branchFilter(actor, branchId), ...paymentScopeFor(actor) } }, orderBy: { createdAt: "desc" }, take: 100, include: { payment: { select: { receiptNumber: true, amount: true, customer: { select: { fullName: true } } } } } });
     return (
       <Card>
         {rows.length ? (

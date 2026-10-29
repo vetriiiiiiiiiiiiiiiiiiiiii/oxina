@@ -4,13 +4,13 @@ import { useRouter } from "next/navigation";
 import { Button, Card, CardBody, CardHeader, Notice, Textarea } from "@/components/ui";
 import { useToast } from "@/components/ui/toast";
 import { apiFetch, ApiError } from "@/lib/client";
-import { cn, fmtMoney } from "@/lib/utils";
+import { cn, fmtMinutes, fmtMoney } from "@/lib/utils";
 
 type Line = { id: string; type: string; description: string; quantity: number; lineTotal: string; isOptional: boolean; approvalStatus: string; repairTaskId: string | null };
 type Est = { id: string; estimateNumber: string; kind: string; labourTotal: string; partsTotal: string; discountTotal: string; taxTotal: string; grandTotal: string; customerNote: string | null; lines: Line[] };
 
 /** Approve or decline each recommended repair (parts follow their repair). */
-export function EstimateApproval({ estimate }: { estimate: Est }) {
+export function EstimateApproval({ estimate, proposed = {} }: { estimate: Est; proposed?: Record<string, { why: string | null; safety: boolean; min: number; max: number }> }) {
   const router = useRouter();
   const toast = useToast();
   const pending = estimate.lines.filter((l) => l.approvalStatus === "PENDING");
@@ -49,7 +49,10 @@ export function EstimateApproval({ estimate }: { estimate: Est }) {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium">{head.description}{optional && <span className="ml-1.5 rounded bg-canvas px-1.5 text-[10px] uppercase text-muted">optional</span>}</p>
-                    <ul className="mt-1 text-xs text-muted">{ls.map((l) => <li key={l.id}>{l.type === "LABOUR" ? "Labour" : `${l.description} × ${l.quantity}`} — {fmtMoney(l.lineTotal)}</li>)}</ul>
+                    {proposed[k]?.why && <p className="mt-0.5 text-[13px]">{proposed[k].why}</p>}
+                    {proposed[k]?.safety && <p className="text-[12px] text-bad-700">Affects riding safety</p>}
+                    <ul className="mt-1 text-xs text-muted">{ls.map((l) => <li key={l.id}>{l.type === "LABOUR" ? "Labour" : `${l.description.replace(/\s*\([^)]*\)\s*$/, "")} × ${l.quantity}`} — {fmtMoney(l.lineTotal)}</li>)}</ul>
+                    {proposed[k] && <p className="mt-0.5 text-xs text-muted">Adds about {proposed[k].min === proposed[k].max ? fmtMinutes(proposed[k].min) : `${fmtMinutes(proposed[k].min)}–${fmtMinutes(proposed[k].max)}`} of workshop time</p>}
                   </div>
                   <p className="whitespace-nowrap text-sm font-semibold tabular-nums">{fmtMoney(sum)}</p>
                 </div>

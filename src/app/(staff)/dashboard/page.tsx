@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { requireStaffPage } from "@/lib/auth/current";
-import { can, type Actor } from "@/lib/rbac/actor";
+import { can, managerAreas, type Actor } from "@/lib/rbac/actor";
 import { selectedBranchId } from "@/lib/branch-context";
 import { dashboard, rangeQuery } from "@/lib/services/reports";
 import { attendanceToday } from "@/lib/services/people";
@@ -8,7 +8,7 @@ import { mechanicBoard } from "@/lib/services/service/repairs";
 import { reorderRecommendations } from "@/lib/services/inventory";
 import { prisma } from "@/lib/db";
 import { branchFilter } from "@/lib/rbac/actor";
-import { attentionList, mechanicLoad, myQueues, partShortages, pipeline, todayCounts, type QueueJob } from "@/lib/services/workqueues";
+import { attentionList, mechanicLoad, myQueues, partShortages, pipeline, showroomSummary, storesSummary, todayCounts, type QueueJob } from "@/lib/services/workqueues";
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, PageHeader, Stat, StatusBadge, Table, Td, Th } from "@/components/ui";
 import { BranchChart, RevenueChart } from "@/components/charts";
 import { RangeFilter } from "@/components/shell/range-filter";
@@ -51,150 +51,167 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
 /* ─────────────────────────── Managers, owners, admins ─────────────────────────── */
 
 async function ManagerView({ actor, branchId, sp }: { actor: Actor; branchId?: string; sp: Record<string, string> }) {
-  const [data, pipe, attention, load, shortages, today] = await Promise.all([
+  const group = can(actor, "dashboard.group");
+  const area = managerAreas(actor);
+  const [data, pipe, attention, load, shortages, today, showroom, stores, low] = await Promise.all([
     dashboard(actor, rangeQuery.parse({ ...sp, branchId })),
-    pipeline(actor, branchId),
-    can(actor, "service.view") ? attentionList(actor, branchId) : [],
-    can(actor, "service.view") ? mechanicLoad(actor, branchId) : [],
-    can(actor, "inventory.view") || can(actor, "service.view") ? partShortages(actor, branchId) : [],
-    todayCounts(actor, branchId),
+    area.workshop ? pipeline(actor, branchId) : null,
+    area.workshop ? attentionList(actor, branchId) : [],
+    area.workshop ? mechanicLoad(actor, branchId) : [],
+    area.workshop || area.stores ? partShortages(actor, branchId) : [],
+    area.workshop ? todayCounts(actor, branchId) : null,
+    area.showroom ? showroomSummary(actor, branchId) : null,
+    area.stores ? storesSummary(actor, branchId) : null,
+    area.stores ? reorderRecommendations(actor, branchId) : null,
   ]);
   const k = data.kpis;
-  const totalOpen = Object.values(pipe).reduce((a, b) => a + b, 0);
-  const noRevenue = data.series.every((d) => !d.sales && !d.service);
   const multiBranch = data.branches.length > 1;
+  // Revenue figures only for the areas this person is responsible for.
+  const series = data.series.map((d) => ({ date: d.date, sales: area.showroom ? d.sales : 0, service: area.workshop || area.money ? d.service : 0 }));
+  const noRevenue = series.every((d) => !d.sales && !d.service);
+
+  const approvals = ([
+    ["Purchase orders to approve", data.approvals.purchaseOrders, "/inventory/purchases", can(actor, "purchases.approve")],
+    ["Expenses to approve", data.approvals.expenses, "/billing?tab=expenses", can(actor, "expenses.approve")],
+    ["Leave requests", data.approvals.leaves, "/attendance", can(actor, "attendance.manage")],
+    ["Refunds to approve", data.approvals.refunds, "/billing?tab=refunds", can(actor, "refunds.approve")],
+    ["Estimates with customers", data.approvals.estimates, "/service?view=awaiting_approval", area.workshop],
+    ["Booking payments to confirm", showroom?.unconfirmedPayments ?? 0, "/billing?tab=payments", area.showroom && can(actor, "payments.confirm")],
+  ] as [string, number, string, boolean][]).filter(([, , , show]) => show);
+
+  const figures: React.ReactNode[] = [];
+  if (area.showroom) figures.push(<Stat key="s" label="Vehicle sales (period)" value={fmtMoney(k.salesRevenue)} hint={`Today ${fmtMoney(k.todaySales)}`} />);
+  if (area.workshop || area.money) figures.push(<Stat key="v" label="Service invoiced (period)" value={fmtMoney(k.serviceRevenue)} hint={`Today ${fmtMoney(k.todayService)}`} />);
+  if (area.money) figures.push(<Stat key="u" label="Unpaid invoices" value={fmtMoney(k.outstandingAmount)} hint={`${k.outstandingCount} invoice(s)`} tone={k.outstandingCount ? "warn" : "neutral"} href="/billing?status=OUTSTANDING" />);
+  if (area.workshop) figures.push(<Stat key="l" label="Past promised time" value={k.overdueJobs} tone={k.overdueJobs ? "bad" : "neutral"} href="/service?view=overdue" />);
+  if (area.stores) figures.push(<Stat key="p" label="Parts at or below minimum" value={k.lowStock} tone={k.lowStock ? "warn" : "neutral"} href="/inventory?lowOnly=true" />);
+  if (area.showroom) figures.push(<Stat key="b" label="Bikes in showroom stock" value={k.showroomStock} href="/vehicles" />);
+  if (area.people) figures.push(<Stat key="d" label="Staff on duty now" value={`${k.clockedIn} / ${k.activeEmployees}`} href="/attendance" />);
+  if (group || can(actor, "warranty.manage")) figures.push(<Stat key="w" label="Warranty claims open" value={k.warrantyPending} href="/warranty" />);
 
   return (
     <div className="space-y-5">
-      {/* Workshop pipeline */}
-      <Card>
-        <CardHeader
-          title={`Workshop — ${totalOpen} open job${totalOpen === 1 ? "" : "s"}`}
-          description={`Today: ${today.received} received · ${today.delivered} delivered · ${today.readyNow} waiting for pickup`}
-          action={<Link href="/service" className="text-[13px] text-brand-600 hover:underline">All jobs →</Link>}
-        />
-        <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9">
-          {PIPELINE.map(([status, label], i) => {
-            const n = pipe[status] ?? 0;
-            const alarm = n > 0 && (status === "PARTS_PENDING" || status === "AWAITING_APPROVAL");
-            return (
-              <Link key={status} href={`/service?status=${status}&view=all`} className={cn("border-line px-3 py-2.5 hover:bg-shade", i > 0 && "border-l", "border-b lg:border-b-0")}>
-                <p className="text-[12px] text-muted">{label}</p>
-                <p className={cn("font-mono text-[22px] leading-tight", n === 0 ? "text-faint" : alarm ? (status === "PARTS_PENDING" ? "text-bad-700" : "text-warn-700") : "text-ink")}>{n}</p>
-              </Link>
-            );
-          })}
-        </div>
-      </Card>
-
-      <div className="grid gap-5 lg:grid-cols-[1.55fr_1fr]">
-        {/* Needs attention */}
+      {area.workshop && pipe && today && (
         <Card>
-          <CardHeader title={`Needs attention${attention.length ? ` (${attention.length})` : ""}`} description="Jobs that won't move without someone acting." />
-          {attention.length ? (
-            <Table>
-              <tbody>
-                {attention.slice(0, 10).map(({ job, reason, tone }) => (
-                  <tr key={job.id} className="hover:bg-shade">
-                    <Td className="w-40 whitespace-nowrap"><Link href={`/service/${job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{job.jobNumber.replace(/^OXI-/, "")}</Link><div className="text-[12px] text-muted">{job.customerVehicle.registrationNumber}</div></Td>
-                    <Td><p className={cn("text-[13px]", tone === "bad" ? "text-bad-700" : tone === "warn" ? "text-warn-700" : "text-ink")}>{reason}</p><p className="text-[12px] text-muted">{job.customer.fullName} · {job.customer.phone} · advisor {job.serviceAdvisor.name}{multiBranch ? ` · ${job.branch.code}` : ""}</p></Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          ) : <EmptyState title="Nothing is stuck right now" />}
-        </Card>
-
-        {/* Approvals */}
-        <Card>
-          <CardHeader title="Waiting for your decision" />
-          <ul className="text-sm">
-            {([
-              ["Purchase orders to approve", data.approvals.purchaseOrders, "/inventory/purchases"],
-              ["Expenses to approve", data.approvals.expenses, "/billing?tab=expenses"],
-              ["Leave requests", data.approvals.leaves, "/attendance"],
-              ["Refunds to approve", data.approvals.refunds, "/billing?tab=refunds"],
-              ["Estimates with customers", data.approvals.estimates, "/service?view=awaiting_approval"],
-            ] as [string, number, string][]).map(([l, n, h]) => (
-              <li key={l} className="border-b border-line last:border-0">
-                <Link href={h} className="flex items-center justify-between px-4 py-2 hover:bg-shade">
-                  <span className={n ? "text-ink" : "text-muted"}>{l}</span>
-                  <span className={cn("font-mono", n ? "font-medium text-warn-700" : "text-faint")}>{n}</span>
+          <CardHeader
+            title={`Workshop — ${Object.values(pipe).reduce((a, b) => a + b, 0)} open jobs`}
+            description={`Today: ${today.received} received · ${today.delivered} delivered · ${today.readyNow} waiting for pickup`}
+            action={<Link href="/service" className="text-[13px] text-brand-600 hover:underline">All jobs →</Link>}
+          />
+          <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9">
+            {PIPELINE.map(([status, label], i) => {
+              const n = pipe[status] ?? 0;
+              const alarm = n > 0 && (status === "PARTS_PENDING" || status === "AWAITING_APPROVAL");
+              return (
+                <Link key={status} href={`/service?status=${status}&view=all`} className={cn("border-b border-line px-3 py-2.5 hover:bg-shade lg:border-b-0", i > 0 && "border-l")}>
+                  <p className="text-[12px] text-muted">{label}</p>
+                  <p className={cn("font-mono text-[22px] leading-tight", n === 0 ? "text-faint" : alarm ? (status === "PARTS_PENDING" ? "text-bad-700" : "text-warn-700") : "text-ink")}>{n}</p>
                 </Link>
-              </li>
-            ))}
-          </ul>
+              );
+            })}
+          </div>
         </Card>
-      </div>
+      )}
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        {/* Mechanics */}
-        {load.length > 0 && (
+      {showroom && <ShowroomPanel s={showroom} />}
+
+      <div className={cn("grid gap-5", area.workshop && approvals.length && "lg:grid-cols-[1.55fr_1fr]")}>
+        {area.workshop && (
           <Card>
-            <CardHeader title="Mechanics" description="What each technician is on now and what is lined up." action={<Link href="/service/board" className="text-[13px] text-brand-600 hover:underline">Workshop board →</Link>} />
-            <Table>
-              <thead><tr><Th>Name</Th><Th>Working on</Th><Th className="text-right">Queued</Th><Th className="text-right">Load</Th></tr></thead>
-              <tbody>
-                {load.map((m) => (
-                  <tr key={m.id}>
-                    <Td className="whitespace-nowrap">{m.name}</Td>
-                    <Td className="text-[13px]">{m.current ? <><Link href={`/service/${m.current.job.id}`} className="text-brand-700 hover:underline">{m.current.title}</Link> <span className="text-muted">· {m.current.job.customerVehicle.registrationNumber}</span></> : <span className="text-faint">Free</span>}{m.blocked > 0 && <span className="ml-2 text-[12px] text-bad-700">{m.blocked} blocked</span>}</Td>
-                    <Td className="text-right font-mono">{m.queued}</Td>
-                    <Td className="text-right font-mono text-[13px]">{m.queuedMinutes ? fmtMinutes(m.queuedMinutes) : "—"}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+            <CardHeader title={`Needs attention${attention.length ? ` (${attention.length})` : ""}`} description="Jobs that won't move without someone acting." />
+            {attention.length ? (
+              <Table>
+                <tbody>
+                  {attention.slice(0, 10).map(({ job, reason, tone }) => (
+                    <tr key={job.id} className="hover:bg-shade">
+                      <Td className="w-40 whitespace-nowrap"><Link href={`/service/${job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{job.jobNumber.replace(/^OXI-/, "")}</Link><div className="text-[12px] text-muted">{job.customerVehicle.registrationNumber}</div></Td>
+                      <Td><p className={cn("text-[13px]", tone === "bad" ? "text-bad-700" : tone === "warn" ? "text-warn-700" : "text-ink")}>{reason}</p><p className="text-[12px] text-muted">{job.customer.fullName} · {job.customer.phone} · advisor {job.serviceAdvisor.name}{multiBranch ? ` · ${job.branch.code}` : ""}</p></Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            ) : <EmptyState title="Nothing is stuck right now" />}
           </Card>
         )}
-
-        {/* Shortages */}
-        <Card>
-          <CardHeader title="Parts holding up jobs" action={<Link href="/inventory/requests?view=shortages" className="text-[13px] text-brand-600 hover:underline">Shortages →</Link>} />
-          {shortages.length ? (
-            <Table>
-              <thead><tr><Th>Part</Th><Th>Job</Th><Th>Expected</Th></tr></thead>
-              <tbody>
-                {shortages.map((r) => (
-                  <tr key={r.id}>
-                    <Td>{r.item.name} <span className="text-muted">× {r.quantity}</span><div className="font-mono text-[12px] text-faint">{r.item.partNumber}</div></Td>
-                    <Td><Link href={`/service/${r.job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{r.job.jobNumber.replace(/^OXI-/, "")}</Link></Td>
-                    <Td className="text-[13px]">{r.expectedAvailableAt ? fmtDateTime(r.expectedAvailableAt) : <span className="text-bad-700">No date yet</span>}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          ) : <EmptyState title="No jobs are waiting on parts" />}
-        </Card>
+        {approvals.length > 0 && (
+          <Card>
+            <CardHeader title="Waiting for your decision" />
+            <ul className="text-sm">
+              {approvals.map(([l, n, h]) => (
+                <li key={l} className="border-b border-line last:border-0">
+                  <Link href={h} className="flex items-center justify-between px-4 py-2 hover:bg-shade">
+                    <span className={n ? "text-ink" : "text-muted"}>{l}</span>
+                    <span className={cn("font-mono", n ? "font-medium text-warn-700" : "text-faint")}>{n}</span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
       </div>
 
-      {/* Figures */}
-      <section>
-        <h2 className="mb-1.5 text-[13px] font-semibold text-muted">Money & stock — {data.range.from} to {data.range.to}</h2>
-        <div className={STRIP}>
-          <Stat label="Vehicle sales (period)" value={fmtMoney(k.salesRevenue)} hint={`Today ${fmtMoney(k.todaySales)}`} />
-          <Stat label="Service invoiced (period)" value={fmtMoney(k.serviceRevenue)} hint={`Today ${fmtMoney(k.todayService)}`} />
-          <Stat label="Unpaid invoices" value={fmtMoney(k.outstandingAmount)} hint={`${k.outstandingCount} invoice(s)`} tone={k.outstandingCount ? "warn" : "neutral"} href="/billing?status=OUTSTANDING" />
-          <Stat label="Parts at or below minimum" value={k.lowStock} tone={k.lowStock ? "warn" : "neutral"} href="/inventory?lowOnly=true" />
-          <Stat label="Bikes in showroom stock" value={k.showroomStock} href="/vehicles" />
-          <Stat label="Staff on duty now" value={`${k.clockedIn} / ${k.activeEmployees}`} href="/attendance" />
-          <Stat label="Warranty claims open" value={k.warrantyPending} href="/warranty" />
-          <Stat label="Past promised time" value={k.overdueJobs} tone={k.overdueJobs ? "bad" : "neutral"} href="/service?view=overdue" />
+      {(area.workshop || area.stores) && (
+        <div className="grid gap-5 lg:grid-cols-2">
+          {area.workshop && load.length > 0 && (
+            <Card>
+              <CardHeader title="Mechanics" description="What each technician is on now and what is lined up." action={<Link href="/service/board" className="text-[13px] text-brand-600 hover:underline">Workshop board →</Link>} />
+              <Table>
+                <thead><tr><Th>Name</Th><Th>Working on</Th><Th className="text-right">Queued</Th><Th className="text-right">Load</Th></tr></thead>
+                <tbody>
+                  {load.map((m) => (
+                    <tr key={m.id}>
+                      <Td className="whitespace-nowrap">{m.name}</Td>
+                      <Td className="text-[13px]">{m.current ? <><Link href={`/service/${m.current.job.id}`} className="text-brand-700 hover:underline">{m.current.title}</Link> <span className="text-muted">· {m.current.job.customerVehicle.registrationNumber}</span></> : <span className="text-faint">Free</span>}{m.blocked > 0 && <span className="ml-2 text-[12px] text-bad-700">{m.blocked} blocked</span>}</Td>
+                      <Td className="text-right font-mono">{m.queued}</Td>
+                      <Td className="text-right font-mono text-[13px]">{m.queuedMinutes ? fmtMinutes(m.queuedMinutes) : "—"}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            </Card>
+          )}
+          <Card>
+            <CardHeader title="Parts holding up jobs" action={<Link href="/inventory/requests?view=shortages" className="text-[13px] text-brand-600 hover:underline">Shortages →</Link>} />
+            {shortages.length ? (
+              <Table>
+                <thead><tr><Th>Part</Th><Th>Job</Th><Th>Expected</Th></tr></thead>
+                <tbody>
+                  {shortages.map((r) => (
+                    <tr key={r.id}>
+                      <Td>{r.item.name} <span className="text-muted">× {r.quantity}</span><div className="font-mono text-[12px] text-faint">{r.item.partNumber}</div></Td>
+                      <Td><Link href={`/service/${r.job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{r.job.jobNumber.replace(/^OXI-/, "")}</Link></Td>
+                      <Td className="text-[13px]">{r.expectedAvailableAt ? fmtDateTime(r.expectedAvailableAt) : <span className="text-bad-700">No date yet</span>}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            ) : <EmptyState title="No jobs are waiting on parts" />}
+          </Card>
+          {stores && low && <StoresPanel s={stores} low={low} />}
         </div>
-      </section>
+      )}
 
-      <div className={cn("grid gap-5", multiBranch && "lg:grid-cols-2")}>
-        <Card>
-          <CardHeader title="Invoiced revenue by day" />
-          <CardBody>{noRevenue ? <EmptyState title="No invoices finalized in this period" /> : <RevenueChart data={data.series} />}</CardBody>
-        </Card>
-        {multiBranch && (
+      {figures.length > 0 && (
+        <section>
+          <h2 className="mb-1.5 text-[13px] font-semibold text-muted">Figures — {data.range.from} to {data.range.to}</h2>
+          <div className={STRIP}>{figures}</div>
+        </section>
+      )}
+
+      {(area.showroom || area.workshop || area.money) && (
+        <div className={cn("grid gap-5", multiBranch && "lg:grid-cols-2")}>
           <Card>
-            <CardHeader title="Revenue by branch" />
-            <CardBody>{data.branches.some((b) => b.salesRevenue || b.serviceRevenue) ? <BranchChart data={data.branches.filter((b) => b.salesRevenue || b.serviceRevenue)} /> : <EmptyState title="No revenue in this period" />}</CardBody>
+            <CardHeader title="Invoiced revenue by day" />
+            <CardBody>{noRevenue ? <EmptyState title="No invoices finalized in this period" /> : <RevenueChart data={series} />}</CardBody>
           </Card>
-        )}
-      </div>
+          {multiBranch && (
+            <Card>
+              <CardHeader title="Revenue by branch" />
+              <CardBody>{data.branches.some((b) => b.salesRevenue || b.serviceRevenue) ? <BranchChart data={data.branches.filter((b) => b.salesRevenue || b.serviceRevenue)} /> : <EmptyState title="No revenue in this period" />}</CardBody>
+            </Card>
+          )}
+        </div>
+      )}
 
       {multiBranch && (
         <Card>
@@ -217,15 +234,69 @@ async function ManagerView({ actor, branchId, sp }: { actor: Actor; branchId?: s
         </Card>
       )}
 
-      <Card>
-        <CardHeader title="Recent changes" action={can(actor, "audit.view") ? <Link className="text-[13px] text-brand-600 hover:underline" href="/audit">Audit log →</Link> : undefined} />
-        {data.recent.length ? (
-          <ul className="grid text-[13px] sm:grid-cols-2">
-            {data.recent.map((r) => <li key={r.id} className="flex justify-between gap-3 border-b border-line px-4 py-1.5"><span><span className="text-ink">{r.actor}</span> <span className="text-muted">{titleCase(r.action.replace(/\./g, " "))}</span></span><span className="whitespace-nowrap font-mono text-[12px] text-faint">{fmtTime(r.at)}</span></li>)}
-          </ul>
-        ) : <EmptyState title="No recent changes" />}
-      </Card>
+      {can(actor, "audit.view") && (
+        <Card>
+          <CardHeader title="Recent changes" action={<Link className="text-[13px] text-brand-600 hover:underline" href="/audit">Audit log →</Link>} />
+          {data.recent.length ? (
+            <ul className="grid text-[13px] sm:grid-cols-2">
+              {data.recent.map((r) => <li key={r.id} className="flex justify-between gap-3 border-b border-line px-4 py-1.5"><span><span className="text-ink">{r.actor}</span> <span className="text-muted">{titleCase(r.action.replace(/\./g, " "))}</span></span><span className="whitespace-nowrap font-mono text-[12px] text-faint">{fmtTime(r.at)}</span></li>)}
+            </ul>
+          ) : <EmptyState title="No recent changes" />}
+        </Card>
+      )}
     </div>
+  );
+}
+
+const LEAD_STAGES: [string, string][] = [["NEW", "New"], ["CONTACTED", "Contacted"], ["TEST_RIDE_SCHEDULED", "Test ride booked"], ["QUOTED", "Quoted"]];
+const BOOKING_STAGES: [string, string][] = [["RESERVED", "Reserved"], ["CONFIRMED", "Confirmed"], ["FINANCE_PENDING", "Finance"], ["AWAITING_REGISTRATION", "Registration"], ["ACCESSORIES_PENDING", "Accessories"], ["READY_FOR_DELIVERY", "Ready"]];
+
+function ShowroomPanel({ s }: { s: Awaited<ReturnType<typeof showroomSummary>> }) {
+  const cells = (rows: [string, string][], counts: Record<string, number>, href: (k: string) => string) =>
+    rows.map(([k, l], i) => (
+      <Link key={k} href={href(k)} className={cn("border-b border-line px-3 py-2.5 hover:bg-shade lg:border-b-0", i > 0 && "border-l")}>
+        <p className="text-[12px] text-muted">{l}</p>
+        <p className={cn("font-mono text-[22px] leading-tight", counts[k] ? "text-ink" : "text-faint")}>{counts[k] ?? 0}</p>
+      </Link>
+    ));
+  return (
+    <>
+      <Card>
+        <CardHeader title="Showroom" description={`${Object.values(s.leads).reduce((a, b) => a + b, 0)} open leads · ${Object.values(s.bookings).reduce((a, b) => a + b, 0)} bookings in progress · ${s.stock.AVAILABLE ?? 0} bikes available to sell`} action={<Link href="/showroom" className="text-[13px] text-brand-600 hover:underline">Leads & bookings →</Link>} />
+        <div className="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10">
+          {cells(LEAD_STAGES, s.leads, (k) => `/showroom?status=${k}`)}
+          {cells(BOOKING_STAGES, s.bookings, (k) => `/showroom?tab=bookings&status=${k}`)}
+        </div>
+      </Card>
+      <div className="grid gap-5 lg:grid-cols-2">
+        <Card>
+          <CardHeader title={`Follow-ups overdue (${s.overdueLeads.length})`} />
+          {s.overdueLeads.length ? <ul>{s.overdueLeads.map((l) => (
+            <li key={l.id} className="border-b border-line last:border-0"><Link href={`/showroom/leads/${l.id}`} className="flex justify-between gap-3 px-4 py-2 text-[13px] hover:bg-shade"><span>{l.name} <span className="text-muted">· {l.phone} · {l.assignedTo?.name ?? "unassigned"}</span></span><span className="whitespace-nowrap text-bad-700">since {fmtDateTime(l.nextFollowUpAt)}</span></Link></li>
+          ))}</ul> : <EmptyState title="No overdue follow-ups" />}
+        </Card>
+        <Card>
+          <CardHeader title={`Ready to deliver (${s.ready.length})`} />
+          {s.ready.length ? <ul>{s.ready.map((b) => (
+            <li key={b.id} className="border-b border-line last:border-0"><Link href={`/showroom/bookings/${b.id}`} className="flex justify-between gap-3 px-4 py-2 text-[13px] hover:bg-shade"><span><span className="font-mono">{b.bookingNumber}</span> · {b.customer.fullName} · {b.vehicleModel.name}</span><span className="text-muted">{b.deliveryScheduledAt ? fmtDateTime(b.deliveryScheduledAt) : "not scheduled"}</span></Link></li>
+          ))}</ul> : <EmptyState title="No deliveries waiting" />}
+        </Card>
+      </div>
+    </>
+  );
+}
+
+function StoresPanel({ s, low }: { s: Awaited<ReturnType<typeof storesSummary>>; low: Awaited<ReturnType<typeof reorderRecommendations>> }) {
+  return (
+    <Card>
+      <CardHeader title="Stores" description={`${s.toPick} part(s) to pick for the workshop · ${s.transfers} transfer(s) to act on`} action={<Link href="/inventory" className="text-[13px] text-brand-600 hover:underline">Stock →</Link>} />
+      <ul className="text-[13px]">
+        {s.poToApprove.map((p) => <li key={p.id} className="flex justify-between border-b border-line px-4 py-2"><span>Approve <span className="font-mono">{p.poNumber}</span> · {p.supplier.name}</span><Link href="/inventory/purchases" className="text-brand-600 hover:underline">{fmtMoney(p.totalAmount)} →</Link></li>)}
+        {s.poToReceive.map((p) => <li key={p.id} className="flex justify-between border-b border-line px-4 py-2"><span>Receive <span className="font-mono">{p.poNumber}</span> · {p.supplier.name}</span><span className="text-muted">{p.expectedDate ? `due ${fmtDateTime(p.expectedDate)}` : p.status.toLowerCase().replace("_", " ")}</span></li>)}
+        {low.slice(0, 6).map((r) => <li key={r.itemId + r.branchId} className="flex justify-between border-b border-line px-4 py-2"><span>Reorder {r.name} <span className="text-muted">({r.available} left)</span></span><span className="font-mono">{r.recommendedQty}</span></li>)}
+        {!s.poToApprove.length && !s.poToReceive.length && !low.length && <li className="px-4 py-3 text-muted">Nothing to order or receive.</li>}
+      </ul>
+    </Card>
   );
 }
 

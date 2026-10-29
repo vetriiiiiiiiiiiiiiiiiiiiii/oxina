@@ -40,7 +40,7 @@ export async function attentionList(actor: Actor, branchId?: string, onlyMine = 
   const hours = (h: number) => new Date(now.getTime() - h * 3600_000);
   const [late, noPartDate, waitingCustomer, readyNotCollected, notStarted] = await Promise.all([
     prisma.serviceJob.findMany({ where: { ...scope, status: { notIn: ["DELIVERED", "CLOSED", "CANCELLED", "READY_FOR_DELIVERY"] }, OR: [{ etaLatest: { lt: now } }, { etaLatest: null, expectedCompletionAt: { lt: now } }] }, select: jobSelect, take: 20 }),
-    prisma.serviceJob.findMany({ where: { ...scope, status: OPEN, partRequests: { some: { status: { in: ["UNAVAILABLE", "AWAITING_PROCUREMENT"] }, expectedAvailableAt: null } } }, select: jobSelect, take: 20 }),
+    prisma.serviceJob.findMany({ where: { ...scope, status: OPEN, partRequests: { some: { status: { in: ["UNAVAILABLE", "AWAITING_PROCUREMENT"] }, OR: [{ expectedAvailableAt: null }, { expectedAvailableAt: { lt: now } }] } } }, select: jobSelect, take: 20 }),
     prisma.serviceJob.findMany({ where: { ...scope, status: "AWAITING_APPROVAL", estimates: { some: { status: "SENT", sentAt: { lt: hours(3) } } } }, select: jobSelect, take: 20 }),
     prisma.serviceJob.findMany({ where: { ...scope, status: "READY_FOR_DELIVERY", readyAt: { lt: hours(24) } }, select: jobSelect, take: 20 }),
     prisma.serviceJob.findMany({ where: { ...scope, status: "RECEIVED", receivedAt: { lt: hours(1) } }, select: jobSelect, take: 20 }),
@@ -54,7 +54,7 @@ export async function attentionList(actor: Actor, branchId?: string, onlyMine = 
       items.push({ job: j, reason: reason(j), tone });
     }
   };
-  add(noPartDate, () => "Part missing and no arrival date recorded — customer has no completion time", "bad");
+  add(noPartDate, () => "Part missing with no valid arrival date (none recorded, or it has passed) — get a new date so the customer has a completion time", "bad");
   add(late, () => "Past the promised completion time", "bad");
   add(waitingCustomer, () => "Estimate sent over 3 hours ago, no reply — call the customer", "warn");
   add(readyNotCollected, () => "Ready for over a day, not collected", "warn");
@@ -130,4 +130,33 @@ export async function myQueues(actor: Actor, branchId?: string) {
     can(actor, "showroom.bookings.manage") && !can(actor, "dashboard.branch") ? prisma.vehicleBooking.findMany({ where: { ...scope, salesExecutiveId: actor.userId, status: { notIn: ["DELIVERED", "CANCELLED"] } }, orderBy: { createdAt: "asc" }, select: { id: true, bookingNumber: true, status: true, totalAmount: true, deliveryScheduledAt: true, customer: { select: { fullName: true } }, vehicleModel: { select: { name: true } } } }) : null,
   ]);
   return { myJobs, qcDue, billingDue, paymentsToConfirm, pickQueue, leadsDue, testRidesToday, followUpsDue, myBookings };
+}
+
+/** Showroom manager's view: pipeline, bookings needing action, overdue follow-ups. */
+export async function showroomSummary(actor: Actor, branchId?: string) {
+  const scope = branchFilter(actor, branchId);
+  const now = new Date();
+  const [leads, bookings, overdueLeads, unconfirmed, ready, stock] = await Promise.all([
+    prisma.salesLead.groupBy({ by: ["status"], where: { ...scope, status: { notIn: ["BOOKED", "LOST"] } }, _count: true }),
+    prisma.vehicleBooking.groupBy({ by: ["status"], where: { ...scope, status: { notIn: ["DELIVERED", "CANCELLED"] } }, _count: true }),
+    prisma.salesLead.findMany({ where: { ...scope, status: { notIn: ["BOOKED", "LOST"] }, nextFollowUpAt: { lt: now } }, orderBy: { nextFollowUpAt: "asc" }, take: 10, select: { id: true, name: true, phone: true, nextFollowUpAt: true, assignedTo: { select: { name: true } } } }),
+    prisma.payment.count({ where: { ...scope, bookingId: { not: null }, status: "PENDING_CONFIRMATION" } }),
+    prisma.vehicleBooking.findMany({ where: { ...scope, status: "READY_FOR_DELIVERY" }, take: 10, select: { id: true, bookingNumber: true, deliveryScheduledAt: true, customer: { select: { fullName: true } }, vehicleModel: { select: { name: true } } } }),
+    prisma.vehicle.groupBy({ by: ["status"], where: { ...scope, status: { notIn: ["DELIVERED", "TRANSFERRED", "RETURNED"] } }, _count: true }),
+  ]);
+  const count = (rows: { status: string; _count: number }[]) => Object.fromEntries(rows.map((r) => [r.status, r._count])) as Record<string, number>;
+  return { leads: count(leads), bookings: count(bookings), overdueLeads, unconfirmedPayments: unconfirmed, ready, stock: count(stock) };
+}
+
+/** Stores manager's view: workshop queue, POs to approve/receive, transfers. */
+export async function storesSummary(actor: Actor, branchId?: string) {
+  const scope = branchFilter(actor, branchId);
+  const bf = scope.branchId;
+  const [toPick, poToApprove, poToReceive, transfers] = await Promise.all([
+    prisma.sparePartRequest.count({ where: { ...scope, status: { in: ["RESERVED", "PICKING", "PICKED"] } } }),
+    prisma.purchaseOrder.findMany({ where: { ...scope, status: "SUBMITTED" }, take: 10, select: { id: true, poNumber: true, totalAmount: true, supplier: { select: { name: true } } } }),
+    prisma.purchaseOrder.findMany({ where: { ...scope, status: { in: ["APPROVED", "PARTIALLY_RECEIVED"] } }, take: 10, select: { id: true, poNumber: true, expectedDate: true, status: true, supplier: { select: { name: true } } } }),
+    prisma.stockTransfer.count({ where: { OR: [{ status: { in: ["REQUESTED", "APPROVED"] }, ...(bf ? { fromBranchId: bf } : {}) }, { status: "DISPATCHED", ...(bf ? { toBranchId: bf } : {}) }] } }),
+  ]);
+  return { toPick, poToApprove, poToReceive, transfers };
 }

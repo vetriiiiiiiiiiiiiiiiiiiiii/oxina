@@ -105,3 +105,15 @@ export function branchIn(actor: Actor, requested?: string | null): string | { in
   const f = branchFilter(actor, requested);
   return f.branchId;
 }
+
+/** Which parts of the business a manager runs. Branch Managers, owners and admins run all of them. */
+export function managerAreas(actor: Actor) {
+  const group = can(actor, "dashboard.group");
+  return {
+    workshop: group || can(actor, "service.job.manage"),
+    showroom: group || can(actor, "showroom.pricing.approve"),
+    stores: group || can(actor, "purchases.approve"),
+    money: group || can(actor, "billing.manage") || can(actor, "billing.credit_note"),
+    people: group || can(actor, "attendance.manage"),
+  };
+}

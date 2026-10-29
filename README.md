@@ -33,7 +33,7 @@ For local `.env` values, generate secrets with `openssl rand -base64 48` (`FILE_
 
 ### Demo data (development only)
 
-The seed creates fictional users at `*@oxina.test` (password: `DEMO_PASSWORD` in `prisma/seed.ts`), including `admin@`, `owner@`, `manager.cbe@`, `advisor.cbe@`, `billing.cbe@`, `stock.cbe@`, `sales.cbe@`, `mech1.cbe@`, `qc.cbe@`, `manager.tpr@`, `oem.re@` and portal customers `customer.anand@` / `customer.fathima@`. It drives six service jobs through the real workflow (one closed and paid, one blocked on a part with a procurement date, one awaiting the customer's approval, one in repair, two just received — one at another branch to demonstrate isolation). The seed refuses to run unless `ALLOW_DEMO_SEED=true` and `NODE_ENV` is not `production`.
+The seed creates fictional users at `*@oxina.test` (password: `DEMO_PASSWORD` in `prisma/seed.ts`), including `admin@`, `owner@`, `manager.cbe@`, `service.mgr.cbe@`, `showroom.mgr.cbe@`, `stores.mgr.cbe@`, `advisor.cbe@`, `billing.cbe@`, `stock.cbe@`, `sales.cbe@`, `mech1.cbe@`, `qc.cbe@`, `manager.tpr@`, `oem.re@` and portal customers `customer.anand@` / `customer.fathima@`. It drives six service jobs through the real workflow (one closed and paid, one blocked on a part with a procurement date, one awaiting the customer's approval, one in repair, two just received — one at another branch to demonstrate isolation). The seed refuses to run unless `ALLOW_DEMO_SEED=true` and `NODE_ENV` is not `production`.
 
 ### Production first run
 
@@ -55,7 +55,7 @@ Never use demo data in production. Create the first Super Admin with the bootstr
 
 ## Tests
 
-`npm test` runs 33 tests on a real PostgreSQL test database, covering all 15 mandatory cases from the brief:
+`npm test` runs 39 tests on a real PostgreSQL test database, covering all 15 mandatory cases from the brief:
 
 | # | Case | Test |
 |---|---|---|

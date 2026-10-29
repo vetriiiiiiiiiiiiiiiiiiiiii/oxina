@@ -35,7 +35,7 @@ function useRun() {
 
 type ItemOpt = { id: string; label: string; price: number; compatible: string[] };
 type DurOpt = { key: string; label: string; min: number; max: number; labour: number };
-type TaskForm = { title: string; taskKey: string; minMinutes: number; maxMinutes: number; labourCharge: number; isOptional: boolean; isSafetyCritical: boolean; dependsOn: string; parts: { itemId: string; quantity: number }[] };
+type TaskForm = { title: string; description: string; taskKey: string; minMinutes: number; maxMinutes: number; labourCharge: number; isOptional: boolean; isSafetyCritical: boolean; dependsOn: string; parts: { itemId: string; quantity: number }[] };
 type InspForm = { findings: string; customerSummary: string; internalNotes: string; safetyCritical: boolean; reason: string; checklist: { key: string; label: string; result: string }[]; tasks: TaskForm[] };
 
 const CHECKS = [["engine", "Engine & oil"], ["brakes", "Brakes"], ["tyres", "Tyres"], ["chain", "Chain & sprockets"], ["electrical", "Electrical & lights"], ["battery", "Battery"], ["suspension", "Suspension"], ["clutch", "Clutch & gearbox"]];
@@ -63,7 +63,7 @@ export function InspectionForm({ jobId, items, durations, model, mode }: { jobId
       onSubmit={handleSubmit(async (v) => {
         setErr(null);
         const tasksBody = v.tasks.map((t, i) => ({
-          title: t.title, taskKey: t.taskKey || undefined, minMinutes: Number(t.minMinutes) || undefined, maxMinutes: Number(t.maxMinutes) || undefined,
+          title: t.title, description: t.description?.trim() || undefined, taskKey: t.taskKey || undefined, minMinutes: Number(t.minMinutes) || undefined, maxMinutes: Number(t.maxMinutes) || undefined,
           labourCharge: Number(t.labourCharge || 0), isOptional: !!t.isOptional, isSafetyCritical: !!t.isSafetyCritical,
           dependsOn: t.dependsOn !== "" && t.dependsOn !== undefined && Number(t.dependsOn) !== i ? [Number(t.dependsOn)] : [],
           parts: (t.parts ?? []).filter((p) => p.itemId).map((p) => ({ itemId: p.itemId, quantity: Number(p.quantity) })),
@@ -110,7 +110,7 @@ export function InspectionForm({ jobId, items, durations, model, mode }: { jobId
           <TaskRow key={f.id} index={i} register={register} control={control} items={sortedItems} durations={durations} others={watched.map((t, k) => ({ k, title: t.title })).filter((x) => x.k !== i)} remove={() => tasks.remove(i)}
             onPickStd={(d) => { setValue(`tasks.${i}.title`, d.label); setValue(`tasks.${i}.minMinutes`, d.min); setValue(`tasks.${i}.maxMinutes`, d.max); setValue(`tasks.${i}.labourCharge`, d.labour); }} />
         ))}
-        <Button type="button" variant="outline" size="sm" onClick={() => tasks.append({ title: "", taskKey: "", minMinutes: 30, maxMinutes: 60, labourCharge: 0, isOptional: false, isSafetyCritical: false, dependsOn: "", parts: [] })}>Add repair task</Button>
+        <Button type="button" variant="outline" size="sm" onClick={() => tasks.append({ title: "", description: "", taskKey: "", minMinutes: 30, maxMinutes: 60, labourCharge: 0, isOptional: false, isSafetyCritical: false, dependsOn: "", parts: [] })}>Add repair task</Button>
         {mode === "inspection" && !tasks.fields.length && <p className="text-xs text-muted">No tasks? Completing the inspection without tasks moves the job to final billing.</p>}
       </div>
       {err && <Notice tone="bad">{err}</Notice>}
@@ -138,6 +138,9 @@ function TaskRow({ index, register, control, items, durations, others, remove, o
         <Field label="Task title"><Input {...register(`tasks.${index}.title`, { required: true })} /></Field>
         <button type="button" onClick={remove} className="mt-6 self-start rounded-[3px] p-2 text-faint hover:bg-bad-50 hover:text-bad-600" aria-label="Remove task">Remove</button>
       </div>
+      <Field label="Why it's needed — shown to the customer" hint="Plain words, e.g. “Front pads are down to 2 mm; braking will get weaker.”" className="mt-2">
+        <Input {...register(`tasks.${index}.description`)} placeholder="What you found and what happens if it isn't done" />
+      </Field>
       <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
         <Field label="Min (min)"><Input type="number" min={5} {...register(`tasks.${index}.minMinutes`)} /></Field>
         <Field label="Max (min)"><Input type="number" min={5} {...register(`tasks.${index}.maxMinutes`)} /></Field>

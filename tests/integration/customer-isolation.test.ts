@@ -66,6 +66,27 @@ describe("11. Unauthorized users cannot access private document URLs", () => {
   });
 });
 
+describe("12b. Customer view explains the work without leaking internals", () => {
+  it("shows what is being done, parts, time and technician first name only", async () => {
+    await prisma.user.update({ where: { id: f.users.mechA.id }, data: { name: "Manikandan Rajendran" } });
+    const t = await prisma.repairTask.findFirstOrThrow({ where: { jobId: job1.id } });
+    await prisma.repairTask.update({ where: { id: t.id }, data: { approved: true, status: "BLOCKED", holdReason: "Customer disputes price - manager to call back", description: "Pads are worn; braking is weaker.", assignedMechanicId: f.users.mechA.id } });
+    await prisma.estimateLineItem.updateMany({ where: { repairTaskId: t.id }, data: { approvalStatus: "APPROVED" } });
+    await prisma.repairEstimate.updateMany({ where: { jobId: job1.id }, data: { status: "APPROVED" } });
+    const view = await customerJobView(f.actors.cust1, job1.id);
+    const r = view.repairs.find((x) => x.id === t.id)!;
+    expect(r.why).toBe("Pads are worn; braking is weaker.");
+    expect(r.state.label).toMatch(/On hold/);
+    expect(r.technician).toBe("Manikandan");
+    expect(r.time.estimateMax).toBeGreaterThan(0);
+    expect(r.parts.map((p) => p.name)).toContain("Brake pad");
+    const json = JSON.stringify(view);
+    expect(json).not.toContain("disputes price");
+    expect(json).not.toContain("Rajendran");
+    expect(json).not.toMatch(/holdReason|purchaseCost|internalNotes/);
+  });
+});
+
 describe("12. Customer tracking does not expose internal notes", () => {
   it("omits internal notes, costs, supplier data and other customers", async () => {
     const view = await customerJobView(f.actors.cust1, job1.id);

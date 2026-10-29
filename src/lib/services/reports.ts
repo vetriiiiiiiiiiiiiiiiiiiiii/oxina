@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { forbidden, invalid } from "@/lib/errors";
-import { branchFilter, can, requirePermission, type Actor } from "@/lib/rbac/actor";
+import { branchFilter, can, managerAreas, requirePermission, type Actor } from "@/lib/rbac/actor";
 import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
 import { D, sum } from "@/lib/money";
 import { performance } from "./people";
@@ -133,33 +133,44 @@ export async function dashboard(actor: Actor, q: RangeQuery) {
     };
   });
 
+  // Department managers only receive figures for their own area — enforced here, not just hidden in the page.
+  const area = managerAreas(actor);
+  if (!area.showroom) {
+    for (const b of branchRows) b.salesRevenue = 0;
+    for (const d of Object.values(days)) d.sales = 0;
+  }
+  if (!(area.workshop || area.money)) {
+    for (const b of branchRows) b.serviceRevenue = 0;
+    for (const d of Object.values(days)) d.service = 0;
+  }
+  const hide = <T,>(show: boolean, v: T) => (show ? v : null);
   return {
     range: { from: fromLabel, to: toLabel },
     kpis: {
       businessUnits: units,
       branches: branches.filter((b) => b.isActive).length,
       activeEmployees: employees,
-      showroomStock,
-      jobsInProgress: openJobs,
-      awaitingApproval,
-      blockedByParts: blockedJobs,
-      overdueJobs,
-      todaySales: Number(D(todaySales._sum.grandTotal)),
-      todayService: Number(D(todayService._sum.grandTotal)),
-      salesRevenue: Number(sum(salesInvoices.map((i) => i.grandTotal))),
-      serviceRevenue: Number(sum(serviceInvoices.map((i) => i.grandTotal))),
-      outstandingAmount: Number(D(outstanding._sum.balanceDue)),
-      outstandingCount: outstanding._count,
-      lowStock: balances.filter((b) => b.quantityOnHand - b.quantityReserved <= b.minStockLevel).length,
-      clockedIn,
+      showroomStock: hide(area.showroom, showroomStock),
+      jobsInProgress: hide(area.workshop, openJobs),
+      awaitingApproval: hide(area.workshop, awaitingApproval),
+      blockedByParts: hide(area.workshop, blockedJobs),
+      overdueJobs: hide(area.workshop, overdueJobs),
+      todaySales: hide(area.showroom, Number(D(todaySales._sum.grandTotal))),
+      todayService: hide(area.workshop || area.money, Number(D(todayService._sum.grandTotal))),
+      salesRevenue: hide(area.showroom, Number(sum(salesInvoices.map((i) => i.grandTotal)))),
+      serviceRevenue: hide(area.workshop || area.money, Number(sum(serviceInvoices.map((i) => i.grandTotal)))),
+      outstandingAmount: hide(area.money, Number(D(outstanding._sum.balanceDue))),
+      outstandingCount: hide(area.money, outstanding._count),
+      lowStock: hide(area.stores, balances.filter((b) => b.quantityOnHand - b.quantityReserved <= b.minStockLevel).length),
+      clockedIn: hide(area.people, clockedIn),
       warrantyPending: claims,
     },
     series: Object.values(days),
     branches: branchRows,
     jobsByStatus: jobsByStatus.map((j) => ({ status: j.status, count: j._count })),
     approvals: { expenses: expensesPending, purchaseOrders: posPending, leaves: leavesPending, refunds: refundsPending, estimates: awaitingApproval },
-    recent: recentAudit.map((a) => ({ id: a.id, action: a.action, entityType: a.entityType, actor: a.actor?.name ?? "System", at: a.createdAt })),
-    delayed,
+    recent: !can(actor, "audit.view") ? [] : recentAudit.map((a) => ({ id: a.id, action: a.action, entityType: a.entityType, actor: a.actor?.name ?? "System", at: a.createdAt })),
+    delayed: area.workshop ? delayed : [],
   };
 }
 
@@ -182,12 +193,36 @@ export const REPORTS = {
 } as const;
 
 export type ReportKey = keyof typeof REPORTS;
+
+/** Area each report belongs to; department managers only get their own area's reports. */
+const REPORT_AREA: Record<ReportKey, (keyof ReturnType<typeof managerAreas>)[]> = {
+  revenue: ["money"],
+  service_jobs: ["workshop"],
+  parts_delays: ["workshop", "stores"],
+  repeat_repairs: ["workshop"],
+  mechanic_productivity: ["workshop"],
+  parts_consumption: ["stores", "workshop"],
+  inventory_valuation: ["stores"],
+  stock_shortages: ["stores"],
+  outstanding_invoices: ["money"],
+  followups: ["workshop"],
+  warranty_claims: ["workshop"],
+  satisfaction: ["workshop"],
+  vehicle_sales: ["showroom"],
+};
+
+/** Reports this person may run (OEM representatives: warranty only). */
+export function allowedReports(actor: Actor): ReportKey[] {
+  if (actor.roles.includes("OEM_REPRESENTATIVE") && !actor.allBranches) return ["warranty_claims"];
+  const area = managerAreas(actor);
+  return (Object.keys(REPORTS) as ReportKey[]).filter((k) => REPORT_AREA[k].some((a) => area[a]));
+}
 type Row = Record<string, string | number | null>;
 
 export async function runReport(actor: Actor, key: ReportKey, q: RangeQuery): Promise<{ title: string; columns: string[]; rows: Row[] }> {
   if (key === "warranty_claims") requirePermission(actor, "reports.view", "warranty.view");
   else requirePermission(actor, "reports.view");
-  if (actor.roles.includes("OEM_REPRESENTATIVE") && !actor.allBranches && key !== "warranty_claims") throw forbidden();
+  if (!allowedReports(actor).includes(key)) throw forbidden("This report is outside your area.");
   const { from, to } = resolveRange(q);
   const branches = await branchIdsFor(actor, q);
   const ids = branches.map((b) => b.id);

@@ -18,7 +18,7 @@ const body = z.object({
 
 /** Managers configure durations by branch/model; unit-wide defaults need group scope. */
 export const PUT = api({ body }, async ({ actor, body }) => {
-  requirePermission(actor, "settings.manage", "service.job.manage");
+  requirePermission(actor, "settings.durations");
   if (body.branchId) assertBranch(actor, body.branchId, "Branch");
   else if (!actor.allBranches) throw invalid("Choose a branch for this duration.");
   if (body.maxMinutes < body.minMinutes) throw invalid("Maximum must be at least the minimum.");

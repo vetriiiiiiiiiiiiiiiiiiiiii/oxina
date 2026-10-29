@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma, type Tx } from "@/lib/db";
 import { conflict, forbidden, invalid, notFound, rule } from "@/lib/errors";
-import { assertBranch, branchFilter, can, requirePermission, type Actor } from "@/lib/rbac/actor";
+import { assertBranch, branchFilter, can, managerAreas, requirePermission, type Actor } from "@/lib/rbac/actor";
 import { audit } from "@/lib/audit";
 import { nextNumber } from "@/lib/numbering";
 import { D, ZERO, calcLine, round2, sum } from "@/lib/money";
@@ -78,6 +78,23 @@ export async function buildServiceInvoice(actor: Actor, jobId: string) {
   return invoice;
 }
 
+/**
+ * Invoice kinds a person may see. Accounts roles (billing.manage / credit notes), Branch Managers and owners
+ * see all; a department manager only their own department's invoices.
+ */
+export function invoiceKindsFor(actor: Actor): string[] | null {
+  const area = managerAreas(actor);
+  if (area.money) return null;
+  return [...(area.showroom ? ["VEHICLE_SALE"] : []), ...(area.workshop ? ["SERVICE", "PARTS_COUNTER"] : [])];
+}
+
+/** Payments a person may see: matching invoice kinds, plus booking payments for the showroom. */
+export function paymentScopeFor(actor: Actor): Prisma.PaymentWhereInput {
+  const kinds = invoiceKindsFor(actor);
+  if (!kinds) return {};
+  return { OR: [{ invoice: { kind: { in: kinds } } }, ...(managerAreas(actor).showroom ? [{ bookingId: { not: null } }] : [])] };
+}
+
 export async function getInvoiceForActor(actor: Actor, invoiceId: string) {
   const inv = await prisma.invoice.findUnique({
     where: { id: invoiceId },
@@ -98,6 +115,8 @@ export async function getInvoiceForActor(actor: Actor, invoiceId: string) {
   }
   requirePermission(actor, "billing.view", "billing.manage");
   assertBranch(actor, inv.branchId, "Invoice");
+  const kinds = invoiceKindsFor(actor);
+  if (kinds && !kinds.includes(inv.kind)) throw notFound("Invoice");
   return inv;
 }
 
@@ -190,6 +209,7 @@ export async function confirmPayment(actor: Actor, paymentId: string) {
     const p = await tx.payment.findUnique({ where: { id: paymentId }, include: { branch: { include: { businessUnit: true } } } });
     if (!p) throw notFound("Payment");
     assertBranch(actor, p.branchId, "Payment");
+    if (!(await tx.payment.count({ where: { id: paymentId, ...paymentScopeFor(actor) } }))) throw notFound("Payment");
     if (p.status !== "PENDING_CONFIRMATION") throw rule("This payment is not awaiting confirmation.");
     const receiptNumber = await nextNumber(tx, "RCPT", p.branch.businessUnit.code);
     await tx.payment.update({ where: { id: paymentId }, data: { status: "CONFIRMED", confirmedById: actor.userId, confirmedAt: new Date(), receiptNumber } });
@@ -296,7 +316,8 @@ export const invoiceQuery = z.object({
 
 export async function listInvoices(actor: Actor, q: z.infer<typeof invoiceQuery>) {
   requirePermission(actor, "billing.view", "billing.manage");
-  const where: Prisma.InvoiceWhereInput = { ...branchFilter(actor, q.branchId) };
+  const kinds = invoiceKindsFor(actor);
+  const where: Prisma.InvoiceWhereInput = { ...branchFilter(actor, q.branchId), ...(kinds ? { kind: { in: kinds } } : {}) };
   if (q.status === "OUTSTANDING") where.status = { in: ["FINALIZED", "PARTIALLY_PAID"] };
   else if (q.status) where.status = q.status;
   const [rows, total] = await Promise.all([

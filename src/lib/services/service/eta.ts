@@ -48,7 +48,8 @@ export async function recalcEta(tx: Tx, jobId: string, now = new Date()) {
     let parts: PartsState = { kind: "READY" };
     for (const r of open) {
       if (r.status === "UNAVAILABLE" || r.status === "AWAITING_PROCUREMENT") {
-        if (!r.expectedAvailableAt) {
+        // No date, or a date that has already passed, is not an estimate we can promise from.
+        if (!r.expectedAvailableAt || r.expectedAvailableAt.getTime() < now.getTime()) {
           parts = { kind: "UNKNOWN" };
           break;
         }
@@ -135,4 +136,13 @@ export async function recalcEta(tx: Tx, jobId: string, now = new Date()) {
     (prevLatest?.getTime() ?? null) !== (result.latest?.getTime() ?? null) &&
     (!prevLatest || !result.latest || Math.abs(prevLatest.getTime() - result.latest.getTime()) > 30 * 60_000);
   return { changed, result, formatted: result.latest ? formatInTimeZone(result.latest, job.branch.timezone, "d MMM, h:mm a") : null };
+}
+
+/** Recalculate if the stored ETA is older than `maxAgeMinutes` (time passing alone changes it). */
+export async function refreshEtaIfStale(jobId: string, maxAgeMinutes = 10) {
+  const { prisma } = await import("@/lib/db");
+  const j = await prisma.serviceJob.findUnique({ where: { id: jobId }, select: { status: true, etaUpdatedAt: true } });
+  if (!j || ["READY_FOR_DELIVERY", "DELIVERED", "CLOSED", "CANCELLED"].includes(j.status)) return;
+  if (j.etaUpdatedAt && Date.now() - j.etaUpdatedAt.getTime() < maxAgeMinutes * 60_000) return;
+  await prisma.$transaction((tx) => recalcEta(tx, jobId));
 }

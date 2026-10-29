@@ -186,7 +186,7 @@ export function calculateEta(input: EtaInput): EtaResult {
       latest: null,
       confidence: "UNKNOWN",
       breakdown: base,
-      reason: "Waiting for a confirmed availability date for one or more spare parts.",
+      reason: "Waiting for a confirmed arrival date for a spare part. Your advisor will update you as soon as the supplier confirms.",
     };
   }
   const provisional = approvalPending || partsWaitMinutes > 0;
