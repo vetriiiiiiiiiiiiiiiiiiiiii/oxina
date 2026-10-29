@@ -10,6 +10,8 @@ import { SimpleForm } from "@/components/forms/simple-form";
 import { Pager } from "@/components/shell/tabs";
 import { fmtMoney } from "@/lib/utils";
 import { InventoryTabs } from "./nav";
+import { BarList, SegmentBar } from "@/components/visual/segment-bar";
+import { branchFilter } from "@/lib/rbac/actor";
 
 export const metadata = { title: "Stock & Warehouse" };
 
@@ -23,6 +25,20 @@ export default async function InventoryPage({ searchParams }: { searchParams: Pr
   const locations = await prisma.inventoryLocation.findMany({ where: { isActive: true, ...(branchId ? { branchId } : actor.allBranches ? {} : { branchId: { in: actor.branchIds } }) }, include: { branch: { select: { name: true } } }, orderBy: [{ branch: { name: "asc" } }, { code: "asc" }] });
   const items = await prisma.inventoryItem.findMany({ where: { isActive: true, businessUnitId: { in: units.map(([id]) => id) } }, orderBy: { name: "asc" }, select: { id: true, name: true, partNumber: true } });
   const showCost = can(actor, "inventory.cost.view");
+  // Stock health and fast movers for the charts (whole scope, not just the current page).
+  const bf = branchFilter(actor, branchId);
+  const [allBal, used] = await Promise.all([
+    prisma.inventoryBalance.findMany({ where: { ...bf, item: { isActive: true } }, select: { quantityOnHand: true, quantityReserved: true, minStockLevel: true } }),
+    prisma.sparePartIssue.groupBy({ by: ["itemId"], where: { issuedAt: { gte: new Date(Date.now() - 30 * 86400_000) }, request: bf }, _sum: { quantity: true }, orderBy: { _sum: { quantity: "desc" } }, take: 6 }),
+  ]);
+  const health = { ok: 0, low: 0, out: 0 };
+  for (const b of allBal) {
+    const av = b.quantityOnHand - b.quantityReserved;
+    if (av <= 0) health.out++;
+    else if (av <= b.minStockLevel) health.low++;
+    else health.ok++;
+  }
+  const usedItems = used.length ? await prisma.inventoryItem.findMany({ where: { id: { in: used.map((u) => u.itemId) } }, select: { id: true, name: true, partNumber: true } }) : [];
   return (
     <>
       <PageHeader
@@ -37,6 +53,24 @@ export default async function InventoryPage({ searchParams }: { searchParams: Pr
         )}
       />
       <InventoryTabs active="stock" />
+      <div className="mb-6 grid gap-5 lg:grid-cols-2">
+        <Card>
+          <CardHeader title="Stock health" description={`${allBal.length} part-and-location lines`} />
+          <div className="px-4 py-3">
+            <SegmentBar height={16} segments={[
+              { key: "ok", label: "Above minimum", value: health.ok, color: "var(--color-dept-money)" },
+              { key: "low", label: "At or below minimum", value: health.low, color: "var(--color-dept-parts)", href: "/inventory?lowOnly=true" },
+              { key: "out", label: "None available", value: health.out, color: "var(--color-dept-showroom)", href: "/inventory?lowOnly=true" },
+            ]} />
+          </div>
+        </Card>
+        <Card>
+          <CardHeader title="Most used — last 30 days" description="Parts issued to the workshop" />
+          <div className="px-4 py-3">
+            {used.length ? <BarList color="var(--color-dept-parts)" unit=" pcs" rows={used.map((u) => { const it = usedItems.find((x) => x.id === u.itemId); return { label: it?.name ?? "—", sub: it?.partNumber, value: u._sum.quantity ?? 0 }; })} /> : <p className="text-[13px] text-muted">Nothing issued in the last 30 days.</p>}
+          </div>
+        </Card>
+      </div>
       {reorder.length > 0 && (
         <Card className="mb-6">
           <CardHeader title={`Running low (${reorder.length})`} description="Suggested order = minimum + reorder qty − available − already on order, plus anything jobs are waiting for." />

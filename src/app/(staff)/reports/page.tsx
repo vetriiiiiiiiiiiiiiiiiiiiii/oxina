@@ -5,7 +5,8 @@ import { REPORTS, allowedReports, rangeQuery, runReport, type ReportKey } from "
 import { Card, CardHeader, EmptyState, Notice, PageHeader, Table, Td, Th } from "@/components/ui";
 import { RangeFilter } from "@/components/shell/range-filter";
 import { AppError } from "@/lib/errors";
-import { cn } from "@/lib/utils";
+import { cn, fmtMoney } from "@/lib/utils";
+import { BarList } from "@/components/visual/segment-bar";
 
 export const metadata = { title: "Reports & Analytics" };
 
@@ -41,6 +42,20 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
         </Card>
         <Card className="min-w-0">
           <CardHeader title={data?.title ?? REPORTS[key]} description={data ? `${data.rows.length} row(s)` : undefined} action={data && can(actor, "reports.export") && <a href={csv} className="inline-flex h-8 items-center gap-1 rounded-[3px] border border-line px-3 text-xs font-medium hover:bg-canvas">Export CSV</a>} />
+          {data && data.rows.length > 1 && (() => {
+            // Chart the first numeric column against the first text column, when the report has one.
+            const numCol = data.columns.find((c) => data.rows.some((r) => typeof r[c] === "number"));
+            const labelCol = data.columns.find((c) => c !== numCol && data.rows.every((r) => typeof r[c] === "string" || r[c] === null));
+            if (!numCol || !labelCol) return null;
+            const money = /revenue|sales|service|total|balance|value|paid|collected|claimed|reimbursed|tax/i.test(numCol);
+            const rows = [...data.rows].filter((r) => typeof r[numCol] === "number").sort((a, b) => Number(b[numCol]) - Number(a[numCol])).slice(0, 10);
+            return (
+              <div className="border-b border-line px-4 py-3">
+                <p className="mb-2 text-[12px] text-muted">{numCol.replace(/_/g, " ")} by {labelCol.replace(/_/g, " ")}{data.rows.length > 10 ? " — top 10" : ""}</p>
+                <BarList color="var(--dept, var(--color-dept-workshop))" format={money ? (n) => fmtMoney(n) : undefined} rows={rows.map((r) => ({ label: String(r[labelCol] ?? "—"), value: Number(r[numCol]) }))} />
+              </div>
+            );
+          })()}
           {error ? <div className="p-5"><Notice tone="warn">{error}</Notice></div> : data && data.rows.length ? (
             <Table>
               <thead><tr>{data.columns.map((c) => <Th key={c}>{c.replace(/_/g, " ")}</Th>)}</tr></thead>

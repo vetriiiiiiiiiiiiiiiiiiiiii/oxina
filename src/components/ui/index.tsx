@@ -94,13 +94,22 @@ const STATUS_TONE: Record<string, Tone> = {
   ACTIVE: "ok", DISPATCHED: "warn", PARTIALLY_RECEIVED: "warn", QUEUED: "neutral", SKIPPED_NO_PROVIDER: "neutral",
 };
 
-/** Status as plain coloured text with a small square marker — reads like a ledger, not a pill. */
+const toneTint: Record<Tone, string> = {
+  neutral: "bg-[#efeee9]",
+  brand: "bg-brand-50",
+  ok: "bg-ok-50",
+  warn: "bg-warn-50",
+  bad: "bg-bad-50",
+  navy: "bg-brand-100",
+};
+
+/** Status as a small tinted tag with a square marker and the word — colour is never the only signal. */
 export function StatusBadge({ status, label }: { status: string; label?: string }) {
   const tone = STATUS_TONE[status] ?? "neutral";
   const text = label ?? status.toLowerCase().replace(/_/g, " ");
   return (
-    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap text-[13px]", toneText[tone])}>
-      <span className={cn("size-[7px] shrink-0", toneMark[tone])} aria-hidden />
+    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap rounded-[2px] px-1.5 py-[1px] text-[12.5px] font-medium", toneText[tone], toneTint[tone])}>
+      <span className={cn("size-[6px] shrink-0", toneMark[tone])} aria-hidden />
       {text.charAt(0).toUpperCase() + text.slice(1)}
     </span>
   );
@@ -164,10 +173,10 @@ export function Skeleton({ className }: { className?: string }) {
 
 export function PageHeader({ title, description, actions, eyebrow }: { title: React.ReactNode; description?: React.ReactNode; actions?: React.ReactNode; eyebrow?: React.ReactNode }) {
   return (
-    <div className="mb-5 flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-line pb-3">
+    <div className="mb-5 flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b-2 border-[var(--dept,var(--color-line))] pb-3">
       <div className="min-w-0">
         {eyebrow && <div className="mb-0.5 text-[13px] text-muted [&_a]:hover:underline">{eyebrow}</div>}
-        <h1 className="text-[21px] font-semibold leading-tight text-ink">{title}</h1>
+        <h1 className="text-[23px] font-semibold leading-tight tracking-[-0.01em] text-ink">{title}</h1>
         {description && <p className="mt-1 max-w-3xl text-[13px] text-muted">{description}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
@@ -179,7 +188,7 @@ export function PageHeader({ title, description, actions, eyebrow }: { title: Re
 export function Stat({ label, value, hint, tone = "neutral", href }: { label: string; value: React.ReactNode; hint?: React.ReactNode; tone?: "neutral" | "ok" | "warn" | "bad" | "brand"; icon?: React.ReactNode; href?: string }) {
   const color = { neutral: "text-ink", ok: "text-ok-700", warn: "text-warn-700", bad: "text-bad-700", brand: "text-navy-900" }[tone];
   const inner = (
-    <div className={cn("h-full border border-line bg-white px-3 py-2.5", href && "hover:border-line-strong")}>
+    <div className={cn("h-full border border-line border-t-2 border-t-[var(--dept,var(--color-line))] bg-white px-3 py-2.5", href && "hover:bg-shade")}>
       <p className="text-[12px] text-muted">{label}</p>
       <p className={cn("mt-0.5 font-mono text-[20px] font-medium tabular-nums leading-tight", color)}>{value}</p>
       {hint && <p className="mt-0.5 text-[12px] text-faint">{hint}</p>}

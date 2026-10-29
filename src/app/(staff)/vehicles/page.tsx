@@ -4,11 +4,12 @@ import { prisma } from "@/lib/db";
 import { selectedBranchId, workingBranchId } from "@/lib/branch-context";
 import { accessibleBranches } from "@/lib/services/org";
 import { listVehicles } from "@/lib/services/showroom";
-import { Button, Card, EmptyState, Input, PageHeader, StatusBadge, Table, Td, Th } from "@/components/ui";
+import { Button, Card, CardHeader, EmptyState, Input, PageHeader, StatusBadge, Table, Td, Th } from "@/components/ui";
 import { Modal } from "@/components/ui/modal";
 import { SimpleForm } from "@/components/forms/simple-form";
 import { LinkTabs } from "@/components/shell/tabs";
 import { fmtMoney } from "@/lib/utils";
+import { BarList } from "@/components/visual/segment-bar";
 
 export const metadata = { title: "Vehicle inventory" };
 
@@ -28,6 +29,26 @@ export default async function VehiclesPage({ searchParams }: { searchParams: Pro
     <>
       <PageHeader title="Vehicles in stock"
         actions={wb && can(actor, "vehicles.manage") && <Modal trigger="Add vehicle" title="Receive vehicle into stock" triggerProps={{ variant: "primary" }} wide><SimpleForm url="/api/vehicles" fixed={{ branchId: wb }} successMessage="Vehicle added." fields={[{ name: "vehicleModelId", label: "Model", type: "select", required: true, options: models.map((m) => ({ value: m.id, label: `${m.name} ${m.variant}` })) }, { name: "modelYear", label: "Model year", type: "number", required: true, defaultValue: new Date().getFullYear() }, { name: "colour", label: "Colour", required: true }, { name: "vin", label: "Chassis / VIN", required: true }, { name: "engineNumber", label: "Engine number", required: true }, { name: "stockLocation", label: "Stock location" }, money("purchaseCost", "Purchase cost (₹)", true), money("exShowroomPrice", "Ex-showroom (₹)", true), money("insuranceCharges", "Insurance (₹)"), money("registrationCharges", "Registration (₹)"), money("accessoriesCharges", "Accessories (₹)"), money("fittingCharges", "Fitting (₹)"), money("otherCharges", "Other approved charges (₹)"), { name: "expectedDeliveryDate", label: "Expected delivery date", type: "date" }]} /></Modal>} />
+      {!sp.status && rows.length > 0 && (() => {
+        const byModel = new Map<string, { label: string; available: number; total: number }>();
+        for (const v of rows) {
+          const k = `${v.vehicleModel.name} ${v.vehicleModel.variant}`.trim();
+          const e = byModel.get(k) ?? { label: k, available: 0, total: 0 };
+          e.total++;
+          if (v.status === "AVAILABLE") e.available++;
+          byModel.set(k, e);
+        }
+        const list = [...byModel.values()].sort((a, b) => b.total - a.total);
+        return (
+          <Card className="mb-5">
+            <CardHeader title="In stock by model" description={`${rows.length} bikes not yet delivered · bar = available to sell`} />
+            <div className="grid gap-x-8 px-4 py-3 md:grid-cols-2">
+              <BarList color="var(--color-dept-showroom)" rows={list.slice(0, Math.ceil(list.length / 2)).map((m) => ({ label: m.label, value: m.available, sub: `${m.total} in stock` }))} />
+              <BarList color="var(--color-dept-showroom)" rows={list.slice(Math.ceil(list.length / 2)).map((m) => ({ label: m.label, value: m.available, sub: `${m.total} in stock` }))} />
+            </div>
+          </Card>
+        );
+      })()}
       <LinkTabs active={sp.status ?? "IN_STOCK"} tabs={[{ key: "IN_STOCK", label: "In stock", href: "/vehicles" }, ...STATUSES.map((s) => ({ key: s, label: s.toLowerCase().replace(/_/g, " "), href: `/vehicles?status=${s}` }))]} />
       <form className="mb-4 flex max-w-md gap-2"><Input name="search" defaultValue={sp.search} placeholder="Chassis, model or colour" />{sp.status && <input type="hidden" name="status" value={sp.status} />}<Button variant="outline">Search</Button></form>
       <Card>

@@ -38,3 +38,11 @@ export function etaText(e: { earliest: Date | string | null; latest: Date | stri
   return sameDay ? `${fmtDate(e.latest, tz)}, ${fmtTime(e.earliest, tz)} – ${fmtTime(e.latest, tz)}` : `${a} – ${b}`;
 }
 export const titleCase = (s: string) => s.toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+/** Wall-clock time since something happened ("3 h 20 min", "4 d 2 h"). Not for workshop durations. */
+export function fmtElapsed(m: number | null | undefined) {
+  if (m === null || m === undefined) return "—";
+  if (m < 60 * 24) return fmtMinutes(m);
+  const d = Math.floor(m / 1440);
+  const h = Math.floor((m % 1440) / 60);
+  return h ? `${d} d ${h} h` : `${d} d`;
+}

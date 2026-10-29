@@ -11,8 +11,9 @@ import { Badge, Card, CardBody, CardHeader, DL, EmptyState, Notice, StatusBadge,
 import { EtaPanel, ServiceTimeline } from "@/components/service/timeline";
 import { LiveRefresh } from "@/components/forms/live-refresh";
 import { NextStep, SectionNav, StageBar } from "./progress";
+import { RegPlate } from "@/components/visual/plate";
 import { ActionButton } from "@/components/forms/action-button";
-import { fmtDateTime, fmtMinutes, fmtMoney, titleCase } from "@/lib/utils";
+import { fmtDateTime, fmtElapsed, fmtMinutes, fmtMoney, titleCase } from "@/lib/utils";
 import {
   AssignStaff, CancelJob, DecisionRecorder, DiscountEditor, HandoverForm, InspectionForm, PaymentForm, PhotoUpload, ProcurementForm,
   QcCompleteForm, ReadyForm, SendEstimate, TaskActions, TestRideEnd, TestRideStart,
@@ -55,7 +56,7 @@ export default async function JobWorkspace({ params }: { params: Promise<{ id: s
   const waitingIssue = full.partRequests.filter((r) => ["RESERVED", "PICKING", "PICKED"].includes(r.status)).length;
   const doneTasks = liveTasks.filter((t) => t.status === "COMPLETED").length;
   const sentEstimate = full.estimates.find((e) => e.status === "SENT");
-  const sinceText = (d: Date | null | undefined) => (d ? fmtMinutes(Math.round((Date.now() - new Date(d).getTime()) / 60_000)) : "");
+  const sinceText = (d: Date | null | undefined) => (d ? fmtElapsed(Math.round((Date.now() - new Date(d).getTime()) / 60_000)) : "");
   const next = ((): { title: string; detail?: React.ReactNode; tone?: "navy" | "warn" | "ok" | "muted"; action?: React.ReactNode } => {
     switch (job.status) {
       case "RECEIVED":
@@ -97,12 +98,13 @@ export default async function JobWorkspace({ params }: { params: Promise<{ id: s
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="flex flex-wrap items-center gap-2">
+            <RegPlate reg={job.customerVehicle.registrationNumber} size="lg" />
             <h1 className="font-mono text-xl font-semibold sm:text-2xl">{job.jobNumber}</h1>
             <StatusBadge status={job.status} label={JOB_STATUS_LABEL[job.status]} />
             {job.isEmergency && <Badge tone="bad">Emergency</Badge>}
             <LiveRefresh jobId={job.id} />
           </div>
-          <p className="mt-1 text-sm text-muted">{job.branch.name} · {titleCase(job.serviceType)} · received {fmtDateTime(job.receivedAt, tz)}</p>
+          <p className="mt-1 text-sm text-muted">{job.customerVehicle.modelName} · {job.customer.fullName} · {job.branch.name} · {titleCase(job.serviceType)} · received {fmtDateTime(job.receivedAt, tz)}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {open && can(actor, "service.job.manage") && !job.customerAcknowledgedAt && <ActionButton variant="outline" size="sm" url={`/api/service/jobs/${job.id}/acknowledge`} success="Customer acknowledgement recorded.">Record customer acknowledgement</ActionButton>}
@@ -121,7 +123,7 @@ export default async function JobWorkspace({ params }: { params: Promise<{ id: s
             <CardBody className="grid gap-6 lg:grid-cols-2">
               <DL items={[
                 [<span key="c" className="inline-flex items-center gap-1">Customer</span>, <>{job.customer.fullName}<div className="text-xs text-muted">{job.customer.phone}{job.customer.email ? ` · ${job.customer.email}` : ""}</div></>],
-                [<span key="v" className="inline-flex items-center gap-1">Vehicle</span>, <>{job.customerVehicle.modelName}<div className="text-xs text-muted">{job.customerVehicle.registrationNumber}{job.customerVehicle.vin ? ` · ${job.customerVehicle.vin}` : ""}</div></>],
+                [<span key="v" className="inline-flex items-center gap-1">Vehicle</span>, <>{job.customerVehicle.modelName}<div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted"><RegPlate reg={job.customerVehicle.registrationNumber} />{job.customerVehicle.vin ? <span className="font-mono">{job.customerVehicle.vin}</span> : null}</div></>],
                 [<span key="o" className="inline-flex items-center gap-1">Odometer / fuel</span>, `${job.odometerIn.toLocaleString("en-IN")} km · ${titleCase(job.fuelLevel)}`],
                 ["Accessories received", job.accessoriesReceived.join(", ") || "None"],
               ]} />
@@ -330,7 +332,7 @@ export default async function JobWorkspace({ params }: { params: Promise<{ id: s
               <div><p className="text-muted">Active work left</p><p className="font-medium">{fmtMinutes(breakdown.activeMinutes.min)}–{fmtMinutes(breakdown.activeMinutes.max)}</p></div>
               <div><p className="text-muted">Queue time</p><p className="font-medium">{fmtMinutes(breakdown.queueMinutes?.min)}–{fmtMinutes(breakdown.queueMinutes?.max)}</p></div>
               <div><p className="text-muted">Parts wait</p><p className="font-medium">{fmtMinutes(breakdown.partsWaitMinutes ?? 0)}</p></div>
-              <div><p className="text-muted">Elapsed since intake</p><p className="font-medium">{fmtMinutes(Math.max(0, Math.round((Date.now() - new Date(job.receivedAt).getTime()) / 60_000)))}</p></div>
+              <div><p className="text-muted">Elapsed since intake</p><p className="font-medium">{fmtElapsed(Math.max(0, Math.round((Date.now() - new Date(job.receivedAt).getTime()) / 60_000)))}</p></div>
             </CardBody></Card>
           )}
           <Card>

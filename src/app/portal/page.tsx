@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db";
 import { Card, CardHeader, EmptyState, StatusBadge } from "@/components/ui";
 import { JOB_STATUS_LABEL } from "@/lib/service/stages";
 import { etaText, fmtDate, fmtMoney } from "@/lib/utils";
+import { RegPlate } from "@/components/visual/plate";
+import { StepTracker } from "@/components/visual/steps";
 
 export const metadata = { title: "My vehicles" };
 
@@ -36,10 +38,11 @@ export default async function PortalHome() {
           <h2 className="text-[14px] font-semibold">At the service centre now</h2>
           {active.map((j) => (
             <Link key={j.id} href={`/portal/jobs/${j.id}`} className="block">
-              <Card className="flex items-center gap-4 px-4 py-3 hover:border-line-strong">
+              <Card className="flex items-center gap-4 border-l-[4px] border-l-navy-900 px-4 py-3 hover:border-line-strong">
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium">{j.customerVehicle.modelName} <span className="font-mono text-[13px] font-normal text-muted">{j.customerVehicle.registrationNumber}</span></p>
+                  <p className="flex flex-wrap items-center gap-2 font-medium">{j.customerVehicle.modelName} <RegPlate reg={j.customerVehicle.registrationNumber} /></p>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted"><StatusBadge status={j.status} label={JOB_STATUS_LABEL[j.status]} /> {j.branch.name}</div>
+                  <div className="mt-2.5 max-w-md"><StepTracker status={j.status} held={j.status === "AWAITING_APPROVAL" || j.status === "PARTS_PENDING"} /></div>
                   <p className="mt-1 text-xs">{etaText({ earliest: j.etaEarliest, latest: j.etaLatest, confidence: j.etaConfidence }, j.branch.timezone) ? <>Expected: <b>{etaText({ earliest: j.etaEarliest, latest: j.etaLatest, confidence: j.etaConfidence }, j.branch.timezone)}</b></> : j.status === "READY_FOR_DELIVERY" ? <b className="text-ok-700">Ready for collection</b> : <span className="text-muted">Completion time will be confirmed by your advisor</span>}</p>
                 </div>
                 <span className="text-[13px] text-brand-600">Track →</span>
@@ -56,7 +59,7 @@ export default async function PortalHome() {
               const hist = jobs.filter((j) => j.customerVehicleId === v.id);
               return (
                 <li key={v.id} className="px-5 py-3">
-                  <p className="text-sm font-medium">{v.modelName} <span className="text-xs text-muted">· {v.registrationNumber}</span></p>
+                  <p className="flex flex-wrap items-center gap-2 text-sm font-medium">{v.modelName} <RegPlate reg={v.registrationNumber} /></p>
                   {hist.length ? <ul className="mt-1 space-y-0.5 text-xs">{hist.map((j) => <li key={j.id}><Link href={`/portal/jobs/${j.id}`} className="text-brand-700 hover:underline">{j.jobNumber}</Link> · {fmtDate(j.receivedAt)} · {JOB_STATUS_LABEL[j.status]}</li>)}</ul> : <p className="text-xs text-muted">No service history yet.</p>}
                 </li>
               );

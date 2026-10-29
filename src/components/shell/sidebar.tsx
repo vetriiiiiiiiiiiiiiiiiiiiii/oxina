@@ -6,6 +6,16 @@ import { Logo } from "./logo";
 import { cn } from "@/lib/utils";
 
 type Item = { href: string; label: string; icon: string };
+
+/** Department colour per menu group; pages inherit it through the --dept CSS variable. */
+const DEPT_COLOR: Record<string, string> = {
+  Workshop: "var(--color-dept-workshop)",
+  Showroom: "var(--color-dept-showroom)",
+  Parts: "var(--color-dept-parts)",
+  "Customers & money": "var(--color-dept-money)",
+  People: "var(--color-dept-people)",
+  Admin: "var(--color-dept-admin)",
+};
 type Branch = { id: string; name: string; code: string; businessUnit: { name: string } };
 
 export function AppShell({ nav, user, branches, selected, unread, allBranches, children }: {
@@ -26,6 +36,8 @@ export function AppShell({ nav, user, branches, selected, unread, allBranches, c
   // The longest menu link that prefixes the current path is the active one (so /service/board doesn't also light up /service).
   const best = hrefs.filter((h) => path === h || path.startsWith(h + "/")).sort((a, b) => b.length - a.length)[0];
   const active = (href: string) => href === best;
+  const activeGroup = nav.find((g) => g.items.some((i) => i.href === best))?.group ?? "";
+  const deptColor = DEPT_COLOR[activeGroup] ?? "var(--color-navy-900)";
   const chooseBranch = (id: string) => {
     document.cookie = `oxina_branch=${id}; path=/; samesite=lax; max-age=${60 * 60 * 24 * 90}`;
     router.refresh();
@@ -36,7 +48,12 @@ export function AppShell({ nav, user, branches, selected, unread, allBranches, c
     <nav className="px-3 py-4 text-[14px]" aria-label="Main">
       {nav.map((g) => (
         <div key={g.group} className="mb-4">
-          {g.group && <p className="mb-1 px-2 text-[12px] text-faint">{g.group}</p>}
+          {g.group && (
+            <p className="mb-1 flex items-center gap-1.5 px-2 text-[12px] font-medium" style={{ color: DEPT_COLOR[g.group] }}>
+              <span className="inline-block h-[10px] w-[3px]" style={{ background: DEPT_COLOR[g.group] }} aria-hidden />
+              {g.group}
+            </p>
+          )}
           <ul>
             {g.items.map((it) => (
               <li key={it.href}>
@@ -45,8 +62,9 @@ export function AppShell({ nav, user, branches, selected, unread, allBranches, c
                   aria-current={active(it.href) ? "page" : undefined}
                   className={cn(
                     "flex items-center justify-between border-l-2 px-2 py-[5px]",
-                    active(it.href) ? "border-navy-900 bg-white font-medium text-navy-900" : "border-transparent text-ink/80 hover:text-ink hover:underline",
+                    active(it.href) ? "bg-white font-medium text-ink" : "border-transparent text-ink/80 hover:text-ink hover:underline",
                   )}
+                  style={active(it.href) ? { borderColor: DEPT_COLOR[g.group] ?? "var(--color-navy-900)" } : undefined}
                 >
                   {it.label}
                   {it.href === "/notifications" && unread > 0 && <span className="font-mono text-[12px] text-bad-700">{unread > 99 ? "99+" : unread}</span>}
@@ -104,7 +122,7 @@ export function AppShell({ nav, user, branches, selected, unread, allBranches, c
             </div>
           </div>
         )}
-        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6">
+        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6" style={{ "--dept": deptColor } as React.CSSProperties}>
           <div className="mx-auto max-w-[1360px]">{children}</div>
         </main>
       </div>

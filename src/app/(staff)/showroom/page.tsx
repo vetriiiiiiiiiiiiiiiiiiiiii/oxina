@@ -5,11 +5,13 @@ import { prisma } from "@/lib/db";
 import { selectedBranchId, workingBranchId } from "@/lib/branch-context";
 import { accessibleBranches, branchStaff } from "@/lib/services/org";
 import { listBookings, listLeads } from "@/lib/services/showroom";
-import { Card, EmptyState, Notice, PageHeader, StatusBadge, Table, Td, Th } from "@/components/ui";
+import { Card, CardHeader, EmptyState, Notice, PageHeader, StatusBadge, Table, Td, Th } from "@/components/ui";
 import { Modal } from "@/components/ui/modal";
 import { SimpleForm } from "@/components/forms/simple-form";
 import { LinkTabs } from "@/components/shell/tabs";
 import { fmtDate, fmtDateTime, fmtMoney } from "@/lib/utils";
+import { BarList, SegmentBar } from "@/components/visual/segment-bar";
+import { branchFilter } from "@/lib/rbac/actor";
 
 export const metadata = { title: "Showroom" };
 
@@ -26,6 +28,15 @@ export default async function ShowroomPage({ searchParams }: { searchParams: Pro
     wb && can(actor, "showroom.pricing.approve") ? branchStaff(actor, wb, ["SALES_EXECUTIVE", "BRANCH_MANAGER"]) : [],
   ]);
   const modelOpts = models.map((m) => ({ value: m.id, label: `${m.name} ${m.variant}`.trim() }));
+  const bf = branchFilter(actor, branchId);
+  const own = !can(actor, "showroom.pricing.approve") ? { assignedToId: actor.userId } : {};
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  const [leadCounts, bookingCounts] = await Promise.all([
+    prisma.salesLead.groupBy({ by: ["status"], where: { ...bf, ...own, OR: [{ status: { notIn: ["BOOKED", "LOST"] } }, { updatedAt: { gte: monthStart } }] }, _count: true }),
+    prisma.vehicleBooking.groupBy({ by: ["status"], where: { ...bf, ...(own.assignedToId ? { salesExecutiveId: actor.userId } : {}), status: { notIn: ["DELIVERED", "CANCELLED"] } }, _count: true }),
+  ]);
+  const lc = (k: string) => leadCounts.find((x) => x.status === k)?._count ?? 0;
+  const bc = (k: string) => bookingCounts.find((x) => x.status === k)?._count ?? 0;
   return (
     <>
       <PageHeader title="Showroom" description={can(actor, "showroom.pricing.approve") ? undefined : "Your leads and bookings."}
@@ -35,6 +46,34 @@ export default async function ShowroomPage({ searchParams }: { searchParams: Pro
           </Modal>
         )} />
       {!wb && <div className="mb-4"><Notice tone="warn">Select a branch in the header to create enquiries.</Notice></div>}
+      <div className="mb-5 grid gap-5 lg:grid-cols-2">
+        <Card>
+          <CardHeader title="Lead funnel" description="Open leads by stage, plus this month's bookings and losses" />
+          <div className="px-4 py-3">
+            <BarList color="var(--color-dept-showroom)" rows={[
+              { label: "New", value: lc("NEW"), href: "/showroom?status=NEW" },
+              { label: "Contacted", value: lc("CONTACTED"), href: "/showroom?status=CONTACTED" },
+              { label: "Test ride booked", value: lc("TEST_RIDE_SCHEDULED"), href: "/showroom?status=TEST_RIDE_SCHEDULED" },
+              { label: "Quoted", value: lc("QUOTED"), href: "/showroom?status=QUOTED" },
+              { label: "Booked this month", value: lc("BOOKED"), href: "/showroom?status=BOOKED" },
+              { label: "Lost this month", value: lc("LOST"), href: "/showroom?status=LOST" },
+            ]} />
+          </div>
+        </Card>
+        <Card>
+          <CardHeader title="Bookings in progress" />
+          <div className="px-4 py-3">
+            {bookingCounts.length ? (
+              <SegmentBar height={16} segments={[
+                { key: "r", label: "Reserved", value: bc("RESERVED"), color: "#8d9096", href: "/showroom?tab=bookings&status=RESERVED" },
+                { key: "c", label: "Confirmed", value: bc("CONFIRMED") + bc("FINANCE_PENDING"), color: "var(--color-dept-workshop)", href: "/showroom?tab=bookings&status=CONFIRMED" },
+                { key: "g", label: "Registration / accessories", value: bc("AWAITING_REGISTRATION") + bc("ACCESSORIES_PENDING"), color: "var(--color-dept-people)", href: "/showroom?tab=bookings&status=AWAITING_REGISTRATION" },
+                { key: "d", label: "Ready to deliver", value: bc("READY_FOR_DELIVERY"), color: "var(--color-dept-money)", href: "/showroom?tab=bookings&status=READY_FOR_DELIVERY" },
+              ]} />
+            ) : <p className="text-[13px] text-muted">No bookings in progress.</p>}
+          </div>
+        </Card>
+      </div>
       <LinkTabs active={tab} tabs={[{ key: "leads", label: "Leads & follow-ups", href: "/showroom?tab=leads" }, { key: "bookings", label: "Bookings & deliveries", href: "/showroom?tab=bookings" }]} />
       {tab === "leads" ? <Leads /> : <Bookings />}
     </>

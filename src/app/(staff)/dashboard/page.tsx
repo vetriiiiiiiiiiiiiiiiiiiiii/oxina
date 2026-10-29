@@ -16,7 +16,10 @@ import { ActionButton } from "@/components/forms/action-button";
 import { AttendanceWidget } from "../attendance/widget";
 import { TaskActions } from "../service/[id]/actions";
 import { JOB_STATUS_LABEL } from "@/lib/service/stages";
-import { cn, etaText, fmtDateTime, fmtMinutes, fmtMoney, fmtTime, titleCase } from "@/lib/utils";
+import { PHASES, phaseOf } from "@/lib/service/phase";
+import { SegmentBar } from "@/components/visual/segment-bar";
+import { cn, etaText, fmtDateTime, fmtElapsed, fmtMinutes, fmtMoney, fmtTime, titleCase } from "@/lib/utils";
+import { RegPlate } from "@/components/visual/plate";
 
 export const metadata = { title: "Overview" };
 
@@ -103,12 +106,15 @@ async function ManagerView({ actor, branchId, sp }: { actor: Actor; branchId?: s
               const n = pipe[status] ?? 0;
               const alarm = n > 0 && (status === "PARTS_PENDING" || status === "AWAITING_APPROVAL");
               return (
-                <Link key={status} href={`/service?status=${status}&view=all`} className={cn("border-b border-line px-3 py-2.5 hover:bg-shade lg:border-b-0", i > 0 && "border-l")}>
+                <Link key={status} href={`/service?status=${status}&view=all`} className={cn("border-b border-line border-t-[3px] px-3 py-2.5 hover:bg-shade lg:border-b-0", i > 0 && "border-l")} style={{ borderTopColor: phaseOf(status)?.color }}>
                   <p className="text-[12px] text-muted">{label}</p>
                   <p className={cn("font-mono text-[22px] leading-tight", n === 0 ? "text-faint" : alarm ? (status === "PARTS_PENDING" ? "text-bad-700" : "text-warn-700") : "text-ink")}>{n}</p>
                 </Link>
               );
             })}
+          </div>
+          <div className="border-t border-line px-4 py-3">
+            <SegmentBar segments={PHASES.map((ph) => ({ key: ph.key, label: ph.label, color: ph.color, value: ph.statuses.reduce((a, st) => a + (pipe[st] ?? 0), 0), href: `/service?status=${ph.statuses[ph.statuses.length - 1]}&view=all` }))} />
           </div>
         </Card>
       )}
@@ -124,7 +130,7 @@ async function ManagerView({ actor, branchId, sp }: { actor: Actor; branchId?: s
                 <tbody>
                   {attention.slice(0, 10).map(({ job, reason, tone }) => (
                     <tr key={job.id} className="hover:bg-shade">
-                      <Td className="w-40 whitespace-nowrap"><Link href={`/service/${job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{job.jobNumber.replace(/^OXI-/, "")}</Link><div className="text-[12px] text-muted">{job.customerVehicle.registrationNumber}</div></Td>
+                      <Td className="w-40 whitespace-nowrap"><Link href={`/service/${job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{job.jobNumber.replace(/^OXI-/, "")}</Link><div className="mt-0.5"><RegPlate reg={job.customerVehicle.registrationNumber} /></div></Td>
                       <Td><p className={cn("text-[13px]", tone === "bad" ? "text-bad-700" : tone === "warn" ? "text-warn-700" : "text-ink")}>{reason}</p><p className="text-[12px] text-muted">{job.customer.fullName} · {job.customer.phone} · advisor {job.serviceAdvisor.name}{multiBranch ? ` · ${job.branch.code}` : ""}</p></Td>
                     </tr>
                   ))}
@@ -310,7 +316,7 @@ function JobRows({ jobs, extra }: { jobs: QueueJob[]; extra?: (j: QueueJob) => R
         {jobs.map((j) => (
           <tr key={j.id} className="hover:bg-shade">
             <Td className="whitespace-nowrap"><Link href={`/service/${j.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{j.jobNumber.replace(/^OXI-/, "")}</Link></Td>
-            <Td>{j.customerVehicle.modelName} <span className="font-mono text-[12px] text-muted">{j.customerVehicle.registrationNumber}</span><div className="text-[12px] text-muted">{j.customer.fullName} · {j.customer.phone}</div></Td>
+            <Td><RegPlate reg={j.customerVehicle.registrationNumber} /> <span className="ml-1">{j.customerVehicle.modelName}</span><div className="text-[12px] text-muted">{j.customer.fullName} · {j.customer.phone}</div></Td>
             <Td><StatusBadge status={j.status} label={JOB_STATUS_LABEL[j.status]} /></Td>
             <Td className="text-[13px]">{etaText({ earliest: null, latest: j.etaLatest, confidence: "FIRM" }, j.branch.timezone) ?? <span className="text-faint">not set</span>}</Td>
             {extra && <Td>{extra(j)}</Td>}
@@ -438,7 +444,7 @@ async function FrontLineView({ actor, branchId }: { actor: Actor; branchId?: str
                 <Td><Link href={`/service/${r.job.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{r.job.jobNumber.replace(/^OXI-/, "")}</Link></Td>
                 <Td className="text-[13px]">{r.assignedMechanic?.name ?? "—"}</Td>
                 <Td><StatusBadge status={r.status} /></Td>
-                <Td className="font-mono text-[13px]">{fmtMinutes(Math.round((Date.now() - r.createdAt.getTime()) / 60_000))}</Td>
+                <Td className="font-mono text-[13px]">{fmtElapsed(Math.round((Date.now() - r.createdAt.getTime()) / 60_000))}</Td>
               </tr>
             ))}</tbody>
           </Table>

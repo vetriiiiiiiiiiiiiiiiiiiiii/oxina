@@ -7,10 +7,19 @@ import { branchStaff } from "@/lib/services/org";
 import { Badge, Card, EmptyState, PageHeader } from "@/components/ui";
 import { fmtMinutes } from "@/lib/utils";
 import { TaskActions } from "../[id]/actions";
+import { RegPlate } from "@/components/visual/plate";
 
 export const metadata = { title: "Task board" };
 
 const COLS = [["READY", "Ready"], ["IN_PROGRESS", "In progress"], ["PAUSED", "Paused"], ["BLOCKED", "Blocked"], ["PENDING", "Waiting"], ["COMPLETED", "Done (24 h)"]] as const;
+const COL_COLOR: Record<string, string> = {
+  READY: "var(--color-dept-workshop)",
+  IN_PROGRESS: "var(--color-navy-900)",
+  PAUSED: "var(--color-dept-parts)",
+  BLOCKED: "var(--color-dept-showroom)",
+  PENDING: "#8d9096",
+  COMPLETED: "var(--color-dept-money)",
+};
 
 export default async function BoardPage() {
   const actor = await requireStaffPage();
@@ -29,14 +38,14 @@ export default async function BoardPage() {
             const col = tasks.filter((t) => t.status === k);
             return (
               <section key={k} className="min-w-0">
-                <h2 className="mb-2 flex items-center justify-between border-b border-line-strong pb-1 text-[13px] font-semibold">{label}<span className="font-mono text-[12px] font-normal text-muted">{col.length}</span></h2>
+                <h2 className="mb-2 flex items-center justify-between border-b-[3px] pb-1 text-[13px] font-semibold" style={{ borderColor: COL_COLOR[k] }}>{label}<span className="font-mono text-[12px] font-normal text-muted">{col.length}</span></h2>
                 <div className="space-y-3">
                   {col.map((t) => (
-                    <Card key={t.id} className="p-3">
+                    <Card key={t.id} className="border-l-[3px] p-3" style={{ borderLeftColor: COL_COLOR[t.status] }}>
                       <div className="flex flex-wrap gap-1">{t.isSafetyCritical && <Badge tone="bad">safety</Badge>}{t.job.isEmergency && <Badge tone="bad">emergency</Badge>}{t.reworkCount > 0 && <Badge tone="warn">rework</Badge>}</div>
                       <p className="mt-1 text-sm font-medium">{t.title}</p>
                       <Link href={`/service/${t.job.id}`} className="text-xs text-brand-700 hover:underline">{t.job.jobNumber}</Link>
-                      <p className="text-xs text-muted">{t.job.customerVehicle.modelName} · {t.job.customerVehicle.registrationNumber}</p>
+                      <p className="mt-1 flex items-center gap-1.5 text-xs text-muted"><RegPlate reg={t.job.customerVehicle.registrationNumber} /> {t.job.customerVehicle.modelName}</p>
                       <p className="mt-1 text-xs text-muted">{t.assignedMechanic?.name ?? "Unassigned"} · {fmtMinutes(t.estimatedMinMinutes)}–{fmtMinutes(t.estimatedMaxMinutes)}</p>
                       {t.holdReason && <p className="mt-1 text-xs text-warn-700">{t.holdReason}</p>}
                       {t.partRequests.length > 0 && <p className="mt-1 text-[11px] text-muted">Parts: {t.partRequests.map((p) => `${p.item.name} (${p.status.toLowerCase().replace(/_/g, " ")})`).join(", ")}</p>}

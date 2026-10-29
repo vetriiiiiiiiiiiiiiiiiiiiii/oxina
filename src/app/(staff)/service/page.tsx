@@ -3,10 +3,14 @@ import { requireStaffPage } from "@/lib/auth/current";
 import { can } from "@/lib/rbac/actor";
 import { selectedBranchId } from "@/lib/branch-context";
 import { listJobs, listJobsQuery } from "@/lib/services/service/intake";
+import { pipeline } from "@/lib/services/workqueues";
+import { PHASES } from "@/lib/service/phase";
+import { SegmentBar } from "@/components/visual/segment-bar";
 import { Button, Card, EmptyState, Input, PageHeader, StatusBadge, Table, Td, Th } from "@/components/ui";
 import { LinkTabs, Pager } from "@/components/shell/tabs";
 import { JOB_STATUS_LABEL } from "@/lib/service/stages";
-import { cn, fmtDateTime, fmtMinutes, fmtTime, fmtDate, titleCase } from "@/lib/utils";
+import { cn, fmtDateTime, fmtElapsed, fmtTime, fmtDate, titleCase } from "@/lib/utils";
+import { RegPlate } from "@/components/visual/plate";
 
 export const metadata = { title: "Service jobs" };
 
@@ -22,7 +26,8 @@ export default async function ServicePage({ searchParams }: { searchParams: Prom
   const branchId = await selectedBranchId(actor);
   const q = listJobsQuery.parse({ ...sp, branchId });
   const count = (view: "open" | "awaiting_approval" | "blocked" | "overdue") => listJobs(actor, { ...q, view, status: undefined, page: 1, pageSize: 1 }).then((r) => r.total);
-  const [data, nOpen, nApproval, nBlocked, nOverdue] = await Promise.all([listJobs(actor, q), count("open"), count("awaiting_approval"), count("blocked"), count("overdue")]);
+  const [data, nOpen, nApproval, nBlocked, nOverdue, pipe] = await Promise.all([listJobs(actor, q), count("open"), count("awaiting_approval"), count("blocked"), count("overdue"), can(actor, "service.view") ? pipeline(actor, branchId) : null]);
+  const phases = PHASES.map((ph) => ({ key: ph.key, label: ph.label, color: ph.color, value: ph.statuses.reduce((a, st) => a + (pipe?.[st] ?? 0), 0), href: `/service?status=${ph.statuses[ph.statuses.length - 1]}&view=all` }));
   const base = (v: string) => `/service?view=${v}${q.search ? `&search=${encodeURIComponent(q.search)}` : ""}`;
   const now = Date.now();
   return (
@@ -37,6 +42,12 @@ export default async function ServicePage({ searchParams }: { searchParams: Prom
           </>
         }
       />
+      {pipe && nOpen > 0 && (
+        <Card className="mb-4 px-4 py-3">
+          <p className="mb-2 text-[13px]"><b className="font-semibold">{nOpen} open job{nOpen === 1 ? "" : "s"}</b> <span className="text-muted">by phase — click a colour to filter</span></p>
+          <SegmentBar segments={phases} height={16} />
+        </Card>
+      )}
       <LinkTabs
         active={q.status ? "" : q.view}
         tabs={[
@@ -73,11 +84,11 @@ export default async function ServicePage({ searchParams }: { searchParams: Prom
                       <Link href={`/service/${j.id}`} className="font-mono text-[13px] text-brand-700 hover:underline">{j.jobNumber.replace(/^OXI-/, "")}</Link>
                       <div className="text-[12px] text-muted">{j.branch.code} · {titleCase(j.serviceType)}{j.isEmergency && <span className="text-bad-700"> · emergency</span>}</div>
                     </Td>
-                    <Td className="whitespace-nowrap"><span className="font-mono text-[13px]">{j.customerVehicle.registrationNumber}</span><div className="text-[12px] text-muted">{j.customerVehicle.modelName}</div></Td>
+                    <Td className="whitespace-nowrap"><RegPlate reg={j.customerVehicle.registrationNumber} /><div className="mt-0.5 text-[12px] text-muted">{j.customerVehicle.modelName}</div></Td>
                     <Td className="text-[13px]">{j.customer.fullName}</Td>
                     <Td><StatusBadge status={j.status} label={JOB_STATUS_LABEL[j.status]} />{j._count.partRequests > 0 && <div className="text-[12px] text-bad-700">{j._count.partRequests} part(s) missing</div>}</Td>
                     <Td className="text-[13px] text-muted">{closed ? "—" : WITH[j.status] ?? "—"}</Td>
-                    <Td className="whitespace-nowrap text-right font-mono text-[13px]">{closed ? "—" : fmtMinutes(Math.round((now - j.receivedAt.getTime()) / 60_000))}</Td>
+                    <Td className="whitespace-nowrap text-right font-mono text-[13px]">{closed ? "—" : fmtElapsed(Math.round((now - j.receivedAt.getTime()) / 60_000))}</Td>
                     <Td className={cn("whitespace-nowrap text-[13px]", late && "text-bad-700")}>
                       {closed ? <span className="text-muted">{fmtDate(j.receivedAt, tz)}</span> : j.etaLatest ? <>{sameDay ? `Today ${fmtTime(j.etaLatest, tz)}` : fmtDateTime(j.etaLatest, tz)}{late && " · late"}{j.etaConfidence === "PROVISIONAL" && !late && <span className="text-muted"> (prov.)</span>}</> : <span className="text-faint">to be confirmed</span>}
                     </Td>

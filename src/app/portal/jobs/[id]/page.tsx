@@ -10,6 +10,8 @@ import { LiveRefresh } from "@/components/forms/live-refresh";
 import { ActionButton } from "@/components/forms/action-button";
 import { cn, fmtDate, fmtDateTime, fmtMinutes, fmtMoney, fmtTime, titleCase } from "@/lib/utils";
 import { EstimateApproval, FeedbackForm, PhotoLink } from "./client";
+import { RegPlate } from "@/components/visual/plate";
+import { StepTracker } from "@/components/visual/steps";
 
 export const metadata = { title: "Your service" };
 
@@ -21,13 +23,30 @@ const CHECK: Record<string, { label: string; cls: string }> = {
 };
 
 const STATE_CLS: Record<string, string> = {
-  done: "text-ok-700",
-  working: "text-navy-900 font-semibold",
-  parts: "text-warn-700",
-  hold: "text-warn-700",
-  paused: "text-warn-700",
-  next: "text-ink",
-  scheduled: "text-muted",
+  done: "text-ok-700 bg-ok-50",
+  working: "text-navy-900 bg-brand-100",
+  parts: "text-bad-700 bg-bad-50",
+  hold: "text-warn-700 bg-warn-50",
+  paused: "text-warn-700 bg-warn-50",
+  next: "text-brand-700 bg-brand-50",
+  scheduled: "text-muted bg-[#efeee9]",
+};
+const STATE_EDGE: Record<string, string> = {
+  done: "var(--color-dept-money)",
+  working: "var(--color-navy-900)",
+  parts: "var(--color-dept-showroom)",
+  hold: "var(--color-dept-parts)",
+  paused: "var(--color-dept-parts)",
+  next: "var(--color-dept-workshop)",
+  scheduled: "#c9c5bb",
+};
+const PART_CLS: Record<string, string> = {
+  issued: "text-ok-700 bg-ok-50",
+  reserved: "text-brand-700 bg-brand-50",
+  checking: "text-muted bg-[#efeee9]",
+  ordered: "text-warn-700 bg-warn-50",
+  ordering: "text-warn-700 bg-warn-50",
+  late: "text-bad-700 bg-bad-50",
 };
 
 function Section({ n, title, children, id }: { n: number; title: string; children: React.ReactNode; id?: string }) {
@@ -58,16 +77,22 @@ export default async function PortalJob({ params }: { params: Promise<{ id: stri
     <div className="space-y-6">
       <div>
         <Link href="/portal" className="text-[13px] text-brand-600 hover:underline">← Your vehicles</Link>
-        <div className="mt-2 flex flex-wrap items-start justify-between gap-2 border-b border-line pb-3">
-          <div>
-            <h1 className="text-[20px] font-semibold leading-tight">{v.vehicle.modelName}</h1>
-            <p className="text-[13px] text-muted"><span className="font-mono">{v.vehicle.registrationNumber}</span> · Job {v.jobNumber} · in since {fmtDateTime(v.receivedAt, tz)}</p>
+        <Card className="mt-2 overflow-hidden">
+          <div className="flex flex-wrap items-start justify-between gap-2 border-b-[3px] border-navy-900 px-4 py-3">
+            <div className="min-w-0">
+              <h1 className="text-[21px] font-semibold leading-tight">{v.vehicle.modelName}</h1>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[13px] text-muted"><RegPlate reg={v.vehicle.registrationNumber} size="md" /> <span>Job {v.jobNumber}</span></div>
+            </div>
+            <div className="text-right">
+              <StatusBadge status={v.status} label={JOB_STATUS_LABEL[v.status]} />
+              {!closed && <div className="mt-1"><LiveRefresh jobId={v.id} /></div>}
+            </div>
           </div>
-          <div className="text-right">
-            <StatusBadge status={v.status} label={JOB_STATUS_LABEL[v.status]} />
-            {!closed && <div><LiveRefresh jobId={v.id} /></div>}
+          <div className="px-3 pb-3 pt-4">
+            <StepTracker status={v.status} held={v.partsDelayed || v.status === "AWAITING_APPROVAL"} />
           </div>
-        </div>
+          <p className="border-t border-line bg-shade px-4 py-1.5 text-[12px] text-muted">In since {fmtDateTime(v.receivedAt, tz)} · {v.branch.name}</p>
+        </Card>
       </div>
 
       {/* 1. What we need from you */}
@@ -215,7 +240,7 @@ function TimeFacts({ v }: { v: CustomerJobView }) {
         {t.repairsTotal > 0 && (
           <div>
             <div className="mb-1 flex justify-between"><span>Repairs finished</span><span className="font-mono">{t.repairsDone} of {t.repairsTotal}</span></div>
-            <div className="h-1.5 bg-line"><div className="h-1.5 bg-ok-600" style={{ width: `${pct}%` }} /></div>
+            <div className="h-2.5 rounded-[2px] bg-line/70"><div className="h-2.5 rounded-[2px] bg-ok-600" style={{ width: `${pct}%` }} /></div>
           </div>
         )}
         <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
@@ -244,11 +269,11 @@ function TimeFacts({ v }: { v: CustomerJobView }) {
 function RepairCard({ r, tz }: { r: CustomerJobView["repairs"][number]; tz: string }) {
   const est = r.time.estimateMin === r.time.estimateMax ? fmtMinutes(r.time.estimateMin) : `${fmtMinutes(r.time.estimateMin)}–${fmtMinutes(r.time.estimateMax)}`;
   return (
-    <Card className={cn(r.state.key === "working" && "border-l-[3px] border-l-navy-900")}>
+    <Card className="border-l-[4px]" style={{ borderLeftColor: STATE_EDGE[r.state.key] ?? "#c9c5bb" }}>
       <div className="px-4 py-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <p className="text-sm font-semibold">{r.title}</p>
-          <p className={cn("text-[13px]", STATE_CLS[r.state.key] ?? "")}>{r.state.label}</p>
+          <p className={cn("rounded-[2px] px-1.5 py-[1px] text-[12.5px] font-medium", STATE_CLS[r.state.key] ?? "")}>{r.state.label}</p>
         </div>
         {(r.safety || r.addedLater || r.redoneAfterCheck) && (
           <p className="mt-0.5 text-[12px] text-muted">
@@ -275,7 +300,7 @@ function RepairCard({ r, tz }: { r: CustomerJobView["repairs"][number]; tz: stri
               {r.parts.map((p, i) => (
                 <li key={i} className="flex flex-wrap justify-between gap-x-3 border-b border-line py-1 last:border-0">
                   <span>{p.name} <span className="text-muted">× {p.quantity}</span></span>
-                  <span className={p.key === "late" ? "text-bad-700" : p.key === "ordering" || p.key === "ordered" ? "text-warn-700" : p.key === "issued" ? "text-ok-700" : "text-muted"}>
+                  <span className={cn("rounded-[2px] px-1.5 text-[12px]", PART_CLS[p.key] ?? "text-muted")}>
                     {p.label}{p.expected ? ` — ${p.key === "late" ? "was due" : "expected"} ${fmtDateTime(p.expected, tz)}` : ""}
                   </span>
                 </li>

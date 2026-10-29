@@ -41,6 +41,18 @@
   --color-bad-600: #b3261e;
   --color-bad-700: #921f19;
 
+  /* Department accents (validated for colour-blind separation; always shown with a text label). */
+  --color-dept-workshop: #2f5bc4;
+  --color-dept-showroom: #b23a48;
+  --color-dept-parts: #c98a1a;
+  --color-dept-money: #2f8a57;
+  --color-dept-people: #8a5cd0;
+  --color-dept-admin: #5f6268;
+
+  /* Chart series: vehicle sales / service. */
+  --color-series-sales: #2f5bc4;
+  --color-series-service: #2f8a57;
+
   --radius-card: 4px;
 }
 

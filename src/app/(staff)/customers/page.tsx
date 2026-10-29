@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/modal";
 import { SimpleForm } from "@/components/forms/simple-form";
 import { Pager } from "@/components/shell/tabs";
 import { fmtDate } from "@/lib/utils";
+import { RegPlate } from "@/components/visual/plate";
 
 export const metadata = { title: "Customers" };
 
@@ -32,7 +33,7 @@ export default async function CustomersPage({ searchParams }: { searchParams: Pr
               <tr key={c.id} className="hover:bg-canvas/60">
                 <Td><Link href={`/customers/${c.id}`} className="font-medium text-brand-700 hover:underline">{c.fullName}</Link><div className="text-xs text-muted">{c.customerCode}</div></Td>
                 <Td className="text-xs">{c.phone}{c.email && <div className="text-muted">{c.email}</div>}</Td>
-                <Td className="text-xs">{c.vehicles.map((v) => `${v.registrationNumber} (${v.modelName})`).join(", ") || "—"}</Td>
+                <Td className="text-xs">{c.vehicles.length ? <div className="flex flex-wrap gap-1.5">{c.vehicles.map((v) => <RegPlate key={v.registrationNumber} reg={v.registrationNumber} />)}</div> : "—"}</Td>
                 <Td className="text-right">{c._count.serviceJobs}</Td>
                 <Td className="text-xs">{fmtDate(c.createdAt)}</Td>
               </tr>
